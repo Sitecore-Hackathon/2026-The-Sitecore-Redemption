@@ -1,7 +1,7 @@
 import Anthropic from "@anthropic-ai/sdk";
 import OpenAI from "openai";
 import { NextResponse } from "next/server";
-import type { AnalyzeRequest, AnalyzeResponse, Finding } from "@/lib/content-intelligence/types";
+import type { AnalyzeRequest, AnalyzeResponse, ContentIntelligenceSettings, Finding } from "@/lib/content-intelligence/types";
 
 // Allow up to 60 s — AI calls can take 20–40 s on large pages
 export const maxDuration = 60;
@@ -20,27 +20,40 @@ function isPlaceholder(key: string | undefined): boolean {
   return key.startsWith("sk-ant-...") || key.startsWith("sk-...") || key === "your-key-here";
 }
 
-function resolveProvider(): Provider | null {
-  const explicit = process.env.AI_PROVIDER?.toLowerCase().trim();
-  if (explicit === "openai") {
+/**
+ * Resolves the AI provider to use.
+ * Priority: Sitecore-stored vendor → AI_PROVIDER env var → auto-detect from key presence.
+ * When a Sitecore apiKey is supplied, any non-null vendor is valid (key overrides .env).
+ */
+function resolveProvider(
+  overrideVendor?: "anthropic" | "openai" | null,
+  overrideKey?: string,
+): Provider | null {
+  // If a Sitecore key was passed, use the vendor it came from
+  if (overrideKey && !isPlaceholder(overrideKey)) {
+    if (overrideVendor === "openai") return "openai";
+    return "anthropic"; // default to anthropic if vendor not specified but key is present
+  }
+  // Vendor hint from Sitecore (no key override — fall through to .env key check)
+  if (overrideVendor === "openai") {
     return isPlaceholder(process.env.OPENAI_API_KEY) ? null : "openai";
   }
-  if (explicit === "anthropic") {
+  if (overrideVendor === "anthropic") {
     return isPlaceholder(process.env.ANTHROPIC_API_KEY) ? null : "anthropic";
   }
-  // Auto-detect
+  // Fall back to AI_PROVIDER env var, then auto-detect
+  const explicit = process.env.AI_PROVIDER?.toLowerCase().trim();
+  if (explicit === "openai")    return isPlaceholder(process.env.OPENAI_API_KEY)    ? null : "openai";
+  if (explicit === "anthropic") return isPlaceholder(process.env.ANTHROPIC_API_KEY) ? null : "anthropic";
   if (!isPlaceholder(process.env.ANTHROPIC_API_KEY)) return "anthropic";
-  if (!isPlaceholder(process.env.OPENAI_API_KEY)) return "openai";
+  if (!isPlaceholder(process.env.OPENAI_API_KEY))    return "openai";
   return null;
 }
 
 // ─── Models ───────────────────────────────────────────────────────────────────
 
-const ANTHROPIC_MODEL =
-  process.env.ANTHROPIC_MODEL ?? "claude-sonnet-4-6";
-
-const OPENAI_MODEL =
-  process.env.OPENAI_MODEL ?? "gpt-4o";
+const DEFAULT_ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL ?? "claude-sonnet-4-6";
+const DEFAULT_OPENAI_MODEL    = process.env.OPENAI_MODEL    ?? "gpt-4o";
 
 // ─── Page content synthesis ───────────────────────────────────────────────────
 
@@ -127,9 +140,39 @@ function synthesisePageContent(req: AnalyzeRequest["pageData"]): string {
   return result;
 }
 
-// ─── Shared system prompt ─────────────────────────────────────────────────────
+// ─── System prompt builder ────────────────────────────────────────────────────
 
-const SYSTEM_PROMPT = `You are a Sitecore XM Cloud content quality analyst specialising in SEO, WCAG accessibility, editorial clarity, and content governance.
+function buildSystemPrompt(settings?: ContentIntelligenceSettings): string {
+  const tone = settings?.preferredTone ?? "formal";
+  const level = settings?.readingLevel ?? "college";
+  const banned = settings?.bannedPhrases ?? [];
+  const schemas = settings?.requiredSchemaTypes ?? [];
+
+  const toneInstruction =
+    tone === "formal"          ? "Write in a formal, professional register." :
+    tone === "conversational"  ? "Write in a friendly, conversational tone." :
+    tone === "technical"       ? "Write in a precise, technical style." :
+                                 `Write in a ${tone} tone.`;
+
+  const levelInstruction: Record<string, string> = {
+    "elementary":  "Target a reading level appropriate for ages 9–11 (Flesch-Kincaid Grade 3–5).",
+    "high-school": "Target a high-school reading level (Flesch-Kincaid Grade 8–10).",
+    "college":     "Target a college reading level (Flesch-Kincaid Grade 12–14).",
+    "expert":      "Target an expert/professional reading level.",
+  };
+
+  const bannedSection = banned.length > 0
+    ? `\n\nBANNED PHRASES: The following phrases must NEVER appear in suggested content: ${banned.map((p) => `"${p}"`).join(", ")}. Flag any finding where these appear in the existing field values.`
+    : "";
+
+  const schemaSection = schemas.length > 0
+    ? `\n\nREQUIRED SCHEMA TYPES: Check whether the page content supports these structured data types: ${schemas.join(", ")}. Flag missing schema opportunities as "suggestion" findings.`
+    : "";
+
+  return `You are a Sitecore XM Cloud content quality analyst specialising in SEO, WCAG accessibility, editorial clarity, and content governance.
+
+${toneInstruction}
+${levelInstruction[level] ?? ""}
 
 Your job is to analyse Sitecore page field values and return a JSON array of specific, actionable findings.
 
@@ -144,7 +187,7 @@ Rules:
 - For plain text fields (no [HTML field] marker): do not add any HTML tags — plain text only.
 - If a finding is about a missing field (empty value), applyValue should be the suggested content to add.
 - Maximum 8 findings total. Prioritise the most impactful.
-- Return ONLY a valid JSON array — no markdown fences, no explanation outside the array.
+- Return ONLY a valid JSON array — no markdown fences, no explanation outside the array.${bannedSection}${schemaSection}
 
 Each finding object must match exactly:
 {
@@ -161,30 +204,41 @@ Each finding object must match exactly:
   "applyValue": "The complete replacement field value, or null if not applicable",
   "standard": "WCAG 2.2 / Google Search Central / Schema.org reference, or null"
 }`;
+}
 
 const USER_PROMPT = (pageContent: string) =>
   `Analyse the following Sitecore page and return findings as a JSON array:\n\n${pageContent}`;
 
 // ─── Provider implementations ─────────────────────────────────────────────────
 
-async function callAnthropic(pageContent: string): Promise<string> {
-  const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+async function callAnthropic(
+  pageContent: string,
+  settings?: ContentIntelligenceSettings,
+  apiKey?: string,
+  model?: string,
+): Promise<string> {
+  const anthropic = new Anthropic({ apiKey: apiKey || process.env.ANTHROPIC_API_KEY });
   const message = await anthropic.messages.create({
-    model: ANTHROPIC_MODEL,
+    model: model || DEFAULT_ANTHROPIC_MODEL,
     max_tokens: 2048,
-    system: SYSTEM_PROMPT,
+    system: buildSystemPrompt(settings),
     messages: [{ role: "user", content: USER_PROMPT(pageContent) }],
   });
   return message.content[0].type === "text" ? message.content[0].text : "";
 }
 
-async function callOpenAI(pageContent: string): Promise<string> {
-  const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+async function callOpenAI(
+  pageContent: string,
+  settings?: ContentIntelligenceSettings,
+  apiKey?: string,
+  model?: string,
+): Promise<string> {
+  const openai = new OpenAI({ apiKey: apiKey || process.env.OPENAI_API_KEY });
   const completion = await openai.chat.completions.create({
-    model: OPENAI_MODEL,
+    model: model || DEFAULT_OPENAI_MODEL,
     max_completion_tokens: 2048,
     messages: [
-      { role: "system", content: SYSTEM_PROMPT },
+      { role: "system", content: buildSystemPrompt(settings) },
       { role: "user", content: USER_PROMPT(pageContent) },
     ],
     // No response_format — asking for a JSON array, not an object.
@@ -242,19 +296,6 @@ function parseFindings(rawText: string): Finding[] | { error: string } {
 export async function POST(
   request: Request,
 ): Promise<NextResponse<AnalyzeResponse & { provider?: string }>> {
-  const provider = resolveProvider();
-
-  if (!provider) {
-    return NextResponse.json(
-      {
-        findings: [],
-        error:
-          "No AI provider configured. Copy .env.local.example to .env.local and set a real ANTHROPIC_API_KEY or OPENAI_API_KEY (not the placeholder value).",
-      },
-      { status: 503 },
-    );
-  }
-
   let body: AnalyzeRequest;
   try {
     body = await request.json();
@@ -265,11 +306,24 @@ export async function POST(
     );
   }
 
-  const { pageData } = body;
+  const { pageData, settings, apiKey, model } = body;
   if (!pageData) {
     return NextResponse.json(
       { findings: [], error: "Missing pageData" },
       { status: 400 },
+    );
+  }
+
+  const provider = resolveProvider(settings?.aiVendor, apiKey);
+
+  if (!provider) {
+    return NextResponse.json(
+      {
+        findings: [],
+        error:
+          "No AI provider configured. Add an API key in the Settings tab or set ANTHROPIC_API_KEY / OPENAI_API_KEY in .env.local.",
+      },
+      { status: 503 },
     );
   }
 
@@ -278,8 +332,8 @@ export async function POST(
   try {
     const rawText =
       provider === "openai"
-        ? await callOpenAI(pageContent)
-        : await callAnthropic(pageContent);
+        ? await callOpenAI(pageContent, settings, apiKey, model)
+        : await callAnthropic(pageContent, settings, apiKey, model);
 
     const result = parseFindings(rawText);
 

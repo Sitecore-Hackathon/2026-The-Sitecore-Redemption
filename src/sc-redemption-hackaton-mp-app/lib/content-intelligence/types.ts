@@ -95,9 +95,68 @@ export interface ContentAnalysis {
 
 export interface AnalyzeRequest {
   pageData: SitecorePageData;
+  /** Sitecore-stored configuration — overrides hard-coded defaults when present */
+  settings?: ContentIntelligenceSettings;
+  /** API key from Sitecore vendor item — overrides the .env key on the server */
+  apiKey?: string;
+  /** Model name from Sitecore vendor item — overrides the .env model on the server */
+  model?: string;
 }
 
 export interface AnalyzeResponse {
   findings: Finding[];
   error?: string;
+}
+
+// ─── Settings ─────────────────────────────────────────────────────────────────
+
+export interface SEOPageTypeExpectation {
+  titleMin?: number;
+  titleMax?: number;
+  metaDescMin?: number;
+  metaDescMax?: number;
+}
+
+export interface ContentIntelligenceSettings {
+  // Feature flags
+  enableAIAnalysis: boolean;
+  /** Sitecore-selected vendor; null means use AI_PROVIDER env var */
+  aiVendor: "anthropic" | "openai" | null;
+
+  // AI persona
+  preferredTone: string;
+  readingLevel: string;
+
+  // Governance
+  bannedPhrases: string[];
+  requiredSchemaTypes: string[];
+
+  // SEO thresholds
+  metaDescMinChars: number;
+  metaDescMaxChars: number;
+  titleMinChars: number;
+  titleMaxChars: number;
+
+  // Readability thresholds
+  bodyMinWords: number;
+  passiveVoiceThreshold: number;
+
+  // Category scoring weights (must sum to 100)
+  categoryWeights: {
+    accessibility: number;
+    seo: number;
+    readability: number;
+    completeness: number;
+    governance: number;
+  };
+
+  // Advanced
+  accessibilityThreshold: "AA" | "AAA";
+  seoExpectationsByPageType: Record<string, SEOPageTypeExpectation>;
+  localizationRules: Record<string, unknown>;
+
+  /** itemId of the Global Settings Sitecore item; null = not initialized */
+  settingsItemId: string | null;
+  /** itemId of the active vendor item (Anthropic or OpenAI) */
+  vendorItemId: string | null;
 }

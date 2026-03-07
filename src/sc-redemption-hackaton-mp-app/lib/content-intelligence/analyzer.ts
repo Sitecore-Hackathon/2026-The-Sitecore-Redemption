@@ -2,11 +2,13 @@ import type {
   Category,
   CategoryScore,
   ContentAnalysis,
+  ContentIntelligenceSettings,
   FieldData,
   Finding,
   Grade,
   SitecorePageData,
 } from "./types";
+import { DEFAULT_SETTINGS } from "./settings";
 
 // ─── Field name lookup ────────────────────────────────────────────────────────
 
@@ -62,7 +64,11 @@ function passiveVoicePercent(text: string): number {
 
 // ─── Rules engine ─────────────────────────────────────────────────────────────
 
-export function runRulesEngine(data: SitecorePageData): Finding[] {
+export function runRulesEngine(
+  data: SitecorePageData,
+  settings?: ContentIntelligenceSettings,
+): Finding[] {
+  const cfg = { ...DEFAULT_SETTINGS, ...settings };
   const { fields, language } = data;
   const findings: Finding[] = [];
   let seq = 0;
@@ -98,7 +104,7 @@ export function runRulesEngine(data: SitecorePageData): Finding[] {
     });
   } else if (
     metaDesc &&
-    (metaDesc.value.length < 70 || metaDesc.value.length > 165)
+    (metaDesc.value.length < cfg.metaDescMinChars || metaDesc.value.length > cfg.metaDescMaxChars)
   ) {
     findings.push({
       id: id("seo"),
@@ -106,12 +112,12 @@ export function runRulesEngine(data: SitecorePageData): Finding[] {
       severity: "warning",
       source: "rules",
       confidence: "high",
-      title: `Meta description is ${metaDesc.value.length < 70 ? "too short" : "too long"} (${metaDesc.value.length} chars)`,
+      title: `Meta description is ${metaDesc.value.length < cfg.metaDescMinChars ? "too short" : "too long"} (${metaDesc.value.length} chars)`,
       evidence: `Current meta description: "${metaDesc.value.substring(0, 80)}…"`,
       rationale:
         "Google typically displays 155–160 characters. Descriptions shorter than 70 characters leave unused ranking signal; longer ones are truncated.",
       suggestedFix:
-        "Rewrite the meta description to be 150–160 characters — specific, benefit-led, and keyword-rich.",
+        `Rewrite the meta description to be ${cfg.metaDescMinChars}–${cfg.metaDescMaxChars} characters — specific, benefit-led, and keyword-rich.`,
       standard: "Google Search Central — Snippet best practices",
       fieldName: metaDesc.name,
       fieldId: metaDesc.id,
@@ -146,18 +152,18 @@ export function runRulesEngine(data: SitecorePageData): Finding[] {
       standard: "Google Search Central — Title best practices",
       fieldName: "Title",
     });
-  } else if (title && (title.value.length < 10 || title.value.length > 70)) {
+  } else if (title && (title.value.length < cfg.titleMinChars || title.value.length > cfg.titleMaxChars)) {
     findings.push({
       id: id("seo"),
       category: "seo",
       severity: "warning",
       source: "rules",
       confidence: "high",
-      title: `Page title is ${title.value.length < 10 ? "too short" : "too long"} (${title.value.length} chars)`,
+      title: `Page title is ${title.value.length < cfg.titleMinChars ? "too short" : "too long"} (${title.value.length} chars)`,
       evidence: `Current title: "${title.value}"`,
       rationale:
         "Titles between 50–60 characters perform best in search results. Shorter titles under-utilise ranking space; longer ones are truncated.",
-      suggestedFix: "Rewrite the title to be 50–60 characters.",
+      suggestedFix: `Rewrite the title to be ${cfg.titleMinChars}–${cfg.titleMaxChars} characters.`,
       standard: "Google Search Central — Title best practices",
       fieldName: title.name,
       fieldId: title.id,
@@ -233,7 +239,7 @@ export function runRulesEngine(data: SitecorePageData): Finding[] {
 
   if (bodyField && hasValue(bodyField)) {
     const wc = wordCount(bodyField.value);
-    if (wc < 100) {
+    if (wc < cfg.bodyMinWords) {
       findings.push({
         id: id("read"),
         category: "readability",
@@ -243,9 +249,9 @@ export function runRulesEngine(data: SitecorePageData): Finding[] {
         title: `Body content is very thin (${wc} words)`,
         evidence: `Field "${bodyField.name}" contains approximately ${wc} words`,
         rationale:
-          "Pages with fewer than 100 words of body content are less likely to rank well and may be flagged as thin content by search engines.",
+          `Pages with fewer than ${cfg.bodyMinWords} words of body content are less likely to rank well and may be flagged as thin content by search engines.`,
         suggestedFix:
-          "Expand the body copy to at least 250 words. Add context, supporting evidence, and relevant detail for the target audience.",
+          `Expand the body copy to at least ${cfg.bodyMinWords} words. Add context, supporting evidence, and relevant detail for the target audience.`,
         fieldName: bodyField.name,
         fieldId: bodyField.id,
         currentValue: bodyField.value,
@@ -253,7 +259,7 @@ export function runRulesEngine(data: SitecorePageData): Finding[] {
     }
 
     const pvPercent = passiveVoicePercent(bodyField.value);
-    if (pvPercent > 40) {
+    if (pvPercent > cfg.passiveVoiceThreshold) {
       findings.push({
         id: id("read"),
         category: "readability",
@@ -346,6 +352,34 @@ export function runRulesEngine(data: SitecorePageData): Finding[] {
     }
   }
 
+  // ── BANNED PHRASES ─────────────────────────────────────────────────────────
+
+  if (cfg.bannedPhrases.length > 0) {
+    for (const field of fields) {
+      if (field.name.startsWith("__") || !field.value?.trim()) continue;
+      const lowerVal = field.value.replace(/<[^>]*>/g, " ").toLowerCase();
+      for (const phrase of cfg.bannedPhrases) {
+        if (!phrase.trim()) continue;
+        if (lowerVal.includes(phrase.toLowerCase())) {
+          findings.push({
+            id: id("gov"),
+            category: "governance",
+            severity: "warning",
+            source: "rules",
+            confidence: "high",
+            title: `Banned phrase "${phrase}" found in "${field.name}"`,
+            evidence: `Field "${field.name}" contains the banned phrase: "${phrase}"`,
+            rationale: "This phrase has been flagged by your content governance policy.",
+            suggestedFix: `Remove or replace the phrase "${phrase}" in the "${field.name}" field.`,
+            fieldName: field.name,
+            fieldId: field.id,
+            currentValue: field.value,
+          });
+        }
+      }
+    }
+  }
+
   // Check for language-specific issues (non-English)
   if (language && language.toLowerCase() !== "en" && language.toLowerCase() !== "en-us") {
     const langTitle = findField(fields, "Title", "NavigationTitle");
@@ -373,43 +407,17 @@ export function runRulesEngine(data: SitecorePageData): Finding[] {
 
 // ─── Scoring engine ───────────────────────────────────────────────────────────
 
-const CATEGORY_DEFS: Array<{
-  category: Category;
-  label: string;
-  weight: number;
-  description: string;
-}> = [
-  {
-    category: "accessibility",
-    label: "Accessibility",
-    weight: 30,
-    description: "WCAG 2.2-aligned checks",
-  },
-  {
-    category: "seo",
-    label: "SEO & Discoverability",
-    weight: 25,
-    description: "Google Search Central guidance",
-  },
-  {
-    category: "readability",
-    label: "Readability & Clarity",
-    weight: 20,
-    description: "Editorial heuristics",
-  },
-  {
-    category: "completeness",
-    label: "Content Completeness",
-    weight: 15,
-    description: "Business rule checks",
-  },
-  {
-    category: "governance",
-    label: "Brand & Governance",
-    weight: 10,
-    description: "Org-specific rules",
-  },
-];
+function buildCategoryDefs(
+  weights: ContentIntelligenceSettings["categoryWeights"],
+): Array<{ category: Category; label: string; weight: number; description: string }> {
+  return [
+    { category: "accessibility", label: "Accessibility",         weight: weights.accessibility, description: "WCAG 2.2-aligned checks" },
+    { category: "seo",           label: "SEO & Discoverability", weight: weights.seo,           description: "Google Search Central guidance" },
+    { category: "readability",   label: "Readability & Clarity", weight: weights.readability,   description: "Editorial heuristics" },
+    { category: "completeness",  label: "Content Completeness",  weight: weights.completeness,  description: "Business rule checks" },
+    { category: "governance",    label: "Brand & Governance",    weight: weights.governance,    description: "Org-specific rules" },
+  ];
+}
 
 function computeGrade(score: number): Grade {
   if (score >= 90) return "A";
@@ -419,8 +427,12 @@ function computeGrade(score: number): Grade {
   return "F";
 }
 
-export function computeCategories(findings: Finding[]): CategoryScore[] {
-  return CATEGORY_DEFS.map(({ category, label, weight, description }) => {
+export function computeCategories(
+  findings: Finding[],
+  settings?: ContentIntelligenceSettings,
+): CategoryScore[] {
+  const weights = settings?.categoryWeights ?? DEFAULT_SETTINGS.categoryWeights;
+  return buildCategoryDefs(weights).map(({ category, label, weight, description }) => {
     const catFindings = findings.filter((f) => f.category === category);
     let score = 100;
     for (const f of catFindings) {
@@ -435,8 +447,9 @@ export function computeCategories(findings: Finding[]): CategoryScore[] {
 export function computeAnalysis(
   data: SitecorePageData,
   findings: Finding[],
+  settings?: ContentIntelligenceSettings,
 ): ContentAnalysis {
-  const categories = computeCategories(findings);
+  const categories = computeCategories(findings, settings);
   const overallScore = Math.round(
     categories.reduce((acc, cat) => acc + (cat.score * cat.weight) / 100, 0),
   );

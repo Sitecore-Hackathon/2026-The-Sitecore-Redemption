@@ -27,10 +27,18 @@ import type {
   AnalyzeRequest,
   AnalyzeResponse,
   ContentAnalysis,
+  ContentIntelligenceSettings,
   FieldData,
   Finding,
   SitecorePageData,
 } from "@/lib/content-intelligence/types";
+import {
+  DEFAULT_SETTINGS,
+  fetchSettings,
+  fetchVendorConfig,
+} from "@/lib/content-intelligence/settings";
+import type { VendorConfig } from "@/lib/content-intelligence/settings";
+import { SettingsPanel } from "@/components/content-intelligence/settings-panel";
 import {
   useAppContext,
   useMarketplaceClient,
@@ -43,6 +51,7 @@ import {
   FileSearch,
   Loader2,
   RefreshCw,
+  Settings,
   Sparkles,
 } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -229,9 +238,14 @@ async function fetchItemFields(
   }
 }
 
-async function fetchAIFindings(pageData: SitecorePageData): Promise<Finding[]> {
+async function fetchAIFindings(
+  pageData: SitecorePageData,
+  settings?: ContentIntelligenceSettings,
+  apiKey?: string,
+  model?: string,
+): Promise<Finding[]> {
   try {
-    const payload: AnalyzeRequest = { pageData };
+    const payload: AnalyzeRequest = { pageData, settings, apiKey, model };
     const res = await fetch("/api/content-intelligence/analyze", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -540,6 +554,9 @@ export function ContentIntelligencePanel() {
   const [applyingFixId, setApplyingFixId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [analyzeStep, setAnalyzeStep] = useState("");
+  const [activeTab, setActiveTab] = useState<"analysis" | "settings">("analysis");
+  const [settings, setSettings] = useState<ContentIntelligenceSettings>(DEFAULT_SETTINGS);
+  const [vendorConfig, setVendorConfig] = useState<VendorConfig | null>(null);
 
   const unsubRef = useRef<(() => void) | undefined>(undefined);
 
@@ -587,6 +604,23 @@ export function ContentIntelligencePanel() {
     };
   }, [client]);
 
+  // Load settings from Sitecore once the SDK is ready
+  useEffect(() => {
+    if (!sdkReady || !contextId) return;
+    fetchSettings(client, contextId).then((s) => {
+      setSettings(s);
+      fetchVendorConfig(client, contextId, s.aiVendor).then((v) => setVendorConfig(v));
+    });
+  }, [sdkReady, contextId, client]);
+
+  const handleSettingsSaved = useCallback(
+    (newSettings: ContentIntelligenceSettings, newVendorConfig: VendorConfig | null) => {
+      setSettings(newSettings);
+      setVendorConfig(newVendorConfig);
+    },
+    [],
+  );
+
   const runAnalysis = useCallback(async () => {
     const pageInfo = pagesContext?.pageInfo as Record<string, unknown> | undefined;
     if (!pageInfo?.id) {
@@ -626,11 +660,19 @@ export function ContentIntelligencePanel() {
 
       // 3. Deterministic rules engine
       setAnalyzeStep("Running rules engine…");
-      const ruleFindings = runRulesEngine(pageData);
+      const ruleFindings = runRulesEngine(pageData, settings);
 
-      // 4. AI semantic analysis
-      setAnalyzeStep("Running AI analysis…");
-      const rawAiFindings = await fetchAIFindings(pageData);
+      // 4. AI semantic analysis (skipped when disabled in settings)
+      let rawAiFindings: Finding[] = [];
+      if (settings.enableAIAnalysis) {
+        setAnalyzeStep("Running AI analysis…");
+        rawAiFindings = await fetchAIFindings(
+          pageData,
+          settings,
+          vendorConfig?.apiKey,
+          vendorConfig?.model,
+        );
+      }
       const aiFindings = enrichFindingsWithFieldIds(rawAiFindings, fields);
 
       // 5. Deduplicate: drop AI findings that cover the same field as a rule finding
@@ -643,7 +685,7 @@ export function ContentIntelligencePanel() {
 
       // 6. Compute final score
       setAnalyzeStep("Computing scores…");
-      const result = computeAnalysis(pageData, [...ruleFindings, ...uniqueAiFindings]);
+      const result = computeAnalysis(pageData, [...ruleFindings, ...uniqueAiFindings], settings);
       setAnalysis(result);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Analysis failed. Please retry.");
@@ -652,7 +694,7 @@ export function ContentIntelligencePanel() {
       setAnalyzing(false);
       setAnalyzeStep("");
     }
-  }, [client, pagesContext, contextId]);
+  }, [client, pagesContext, contextId, settings, vendorConfig]);
 
   const applyFix = useCallback(
     async (finding: Finding) => {
@@ -768,56 +810,110 @@ export function ContentIntelligencePanel() {
             )}
           </div>
         )}
+
+        {/* Tab navigation */}
+        <div className="mt-2.5 pt-0.5 flex border-b border-border">
+          {(["analysis", "settings"] as const).map((tab) => (
+            <button
+              key={tab}
+              onClick={() => setActiveTab(tab)}
+              className={`flex items-center gap-1 px-3 py-1.5 text-xs font-medium border-b-2 -mb-px transition-colors ${
+                activeTab === tab
+                  ? "border-primary text-primary-fg"
+                  : "border-transparent text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              {tab === "settings" && <Settings className="h-3 w-3" />}
+              {tab.charAt(0).toUpperCase() + tab.slice(1)}
+            </button>
+          ))}
+        </div>
       </CardHeader>
 
       <CardContent className="space-y-4 pt-0">
-        {error && (
-          <Alert variant="danger">
-            <AlertTitle>Error</AlertTitle>
-            <AlertDescription>{error}</AlertDescription>
-          </Alert>
-        )}
+        {activeTab === "settings" ? (
+          <SettingsPanel contextId={contextId} onSettingsSaved={handleSettingsSaved} />
+        ) : (
+          <>
+            {error && (
+              <Alert variant="danger">
+                <AlertTitle>Error</AlertTitle>
+                <AlertDescription>{error}</AlertDescription>
+              </Alert>
+            )}
 
-        {!sdkReady && !analyzing && (
-          <PanelLoadingSpinner />
-        )}
+            {!settings.settingsItemId && (
+              <Alert variant="warning">
+                <AlertTitle>Module not configured</AlertTitle>
+                <AlertDescription>
+                  AI Content Intelligence has not been set up yet. Using built-in defaults.{" "}
+                  <button
+                    onClick={() => setActiveTab("settings")}
+                    className="underline font-medium"
+                  >
+                    Go to Settings to initialize
+                  </button>
+                </AlertDescription>
+              </Alert>
+            )}
 
-        {sdkReady && !pageInfo && !analyzing && (
-          <Alert variant="default">
-            <AlertTitle>No page selected</AlertTitle>
-            <AlertDescription>
-              Open a page in Sitecore Pages to begin analysis.
-            </AlertDescription>
-          </Alert>
-        )}
+            {settings.settingsItemId && !settings.enableAIAnalysis && (
+              <Alert variant="default">
+                <AlertTitle>AI analysis disabled</AlertTitle>
+                <AlertDescription>
+                  Rules-based analysis will still run.{" "}
+                  <button
+                    onClick={() => setActiveTab("settings")}
+                    className="underline text-primary-fg"
+                  >
+                    Enable in Settings
+                  </button>
+                </AlertDescription>
+              </Alert>
+            )}
 
-        {analyzing && (
-          <div className="space-y-4">
-            <div className="flex items-center gap-2 rounded-md bg-primary-bg px-3 py-2.5 text-sm text-primary-fg">
-              <Sparkles className="h-3.5 w-3.5 animate-pulse shrink-0" />
-              <span className="font-medium">{analyzeStep || "Analyzing…"}</span>
-            </div>
-            <AnalysisSkeleton />
-          </div>
-        )}
+            {!sdkReady && !analyzing && (
+              <PanelLoadingSpinner />
+            )}
 
-        {sdkReady && !analyzing && !analysis && pageInfo && (
-          <EmptyState
-            onAnalyze={runAnalysis}
-            loading={analyzing}
-            pageTitle={pageTitle}
-          />
-        )}
+            {sdkReady && !pageInfo && !analyzing && (
+              <Alert variant="default">
+                <AlertTitle>No page selected</AlertTitle>
+                <AlertDescription>
+                  Open a page in Sitecore Pages to begin analysis.
+                </AlertDescription>
+              </Alert>
+            )}
 
-        {!analyzing && analysis && (
-          <AnalysisResults
-            analysis={analysis}
-            layoutJson={(pageInfo?.presentationDetails as string) || undefined}
-            onReanalyze={runAnalysis}
-            reanalyzing={analyzing}
-            onApplyFix={applyFix}
-            applyingFixId={applyingFixId}
-          />
+            {analyzing && (
+              <div className="space-y-4">
+                <div className="flex items-center gap-2 rounded-md bg-primary-bg px-3 py-2.5 text-sm text-primary-fg">
+                  <Sparkles className="h-3.5 w-3.5 animate-pulse shrink-0" />
+                  <span className="font-medium">{analyzeStep || "Analyzing…"}</span>
+                </div>
+                <AnalysisSkeleton />
+              </div>
+            )}
+
+            {sdkReady && !analyzing && !analysis && pageInfo && (
+              <EmptyState
+                onAnalyze={runAnalysis}
+                loading={analyzing}
+                pageTitle={pageTitle}
+              />
+            )}
+
+            {!analyzing && analysis && (
+              <AnalysisResults
+                analysis={analysis}
+                layoutJson={(pageInfo?.presentationDetails as string) || undefined}
+                onReanalyze={runAnalysis}
+                reanalyzing={analyzing}
+                onApplyFix={applyFix}
+                applyingFixId={applyingFixId}
+              />
+            )}
+          </>
         )}
       </CardContent>
     </Card>
