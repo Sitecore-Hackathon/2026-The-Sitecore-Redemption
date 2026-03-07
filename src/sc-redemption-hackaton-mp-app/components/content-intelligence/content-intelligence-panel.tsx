@@ -123,49 +123,31 @@ const GET_ITEM_FIELDS_QUERY = `
   }
 `;
 
-// ─── Page HTML download ───────────────────────────────────────────────────────
-//
-// NEXT_PUBLIC_SITE_URL must be set in .env.local, e.g. https://my-site.vercel.app
-// The request is proxied server-side to avoid CORS issues.
+// ─── Layout JSON helpers ──────────────────────────────────────────────────────
+// Downloads are blocked in sandboxed iframes (no allow-downloads flag).
+// Instead we show the JSON inline with a copy-to-clipboard button.
 
-const SITE_URL = (process.env.NEXT_PUBLIC_SITE_URL ?? "").replace(/\/$/, "");
-
-async function downloadPageHtml(pageRoute: string, pageTitle: string): Promise<void> {
-  const pageUrl = `${SITE_URL}${pageRoute}`;
-  const proxyUrl = `/api/content-intelligence/page-html?url=${encodeURIComponent(pageUrl)}`;
-  const res = await fetch(proxyUrl);
-  if (!res.ok) {
-    const body = await res.text().catch(() => res.statusText);
-    throw new Error(`Failed to fetch page HTML (${res.status}): ${body}`);
+function prettyLayoutJson(layoutJson: string): string {
+  try {
+    return JSON.stringify(JSON.parse(layoutJson), null, 2);
+  } catch {
+    return layoutJson;
   }
-  const html = await res.text();
-  const blob = new Blob([html], { type: "text/html" });
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = `${pageTitle.replace(/[^a-z0-9]/gi, "-").toLowerCase()}.html`;
-  a.click();
-  URL.revokeObjectURL(a.href);
 }
 
-async function downloadLayoutJson(
-  siteName: string,
-  routePath: string,
-  language: string,
-  pageTitle: string,
-): Promise<void> {
-  const params = new URLSearchParams({ siteName, routePath, language });
-  const res = await fetch(`/api/content-intelligence/layout-json?${params}`);
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({ error: res.statusText }));
-    throw new Error((body as { error?: string }).error ?? res.statusText);
+async function copyToClipboardWithFallback(text: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.cssText = "position:fixed;top:0;left:0;opacity:0;pointer-events:none;";
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    document.execCommand("copy");
+    document.body.removeChild(ta);
   }
-  const json = await res.json();
-  const blob = new Blob([JSON.stringify(json, null, 2)], { type: "application/json" });
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(blob);
-  a.download = `layout-${pageTitle.replace(/[^a-z0-9]/gi, "-").toLowerCase()}.json`;
-  a.click();
-  URL.revokeObjectURL(a.href);
 }
 
 // ─── Data-fetching helpers ────────────────────────────────────────────────────
@@ -349,35 +331,33 @@ function EmptyState({
   pageTitle?: string;
 }) {
   return (
-    <div className="flex flex-col items-center justify-center gap-4 py-10 text-center">
-      <div className="p-4 rounded-full bg-primary-bg">
-        <Sparkles className="h-8 w-8 text-primary-fg" />
+    <div className="flex flex-col items-center justify-center gap-5 py-8 text-center">
+      <div className="rounded-xl bg-primary-bg p-4">
+        <Sparkles className="h-7 w-7 text-primary-fg" />
       </div>
-      <div>
-        <h3 className="font-semibold mb-1">Ready to analyze</h3>
+      <div className="space-y-1.5">
+        <h3 className="font-semibold text-sm">Ready to analyze</h3>
         {pageTitle && (
-          <p className="text-xs text-muted-foreground mb-2 font-mono truncate max-w-xs">
+          <p className="text-xs text-muted-foreground font-mono truncate max-w-[200px]">
             {pageTitle}
           </p>
         )}
-        <p className="text-sm text-muted-foreground max-w-xs">
-          Reads live Sitecore field values, runs a rules engine, then calls
-          Claude AI to generate field-specific recommendations with one-click
-          write-back.
+        <p className="text-xs text-muted-foreground max-w-[260px] leading-relaxed">
+          Fetches live field values, runs deterministic rules, then uses AI to
+          generate field-specific recommendations with one-click write-back.
         </p>
       </div>
-      <Button onClick={onAnalyze} disabled={loading} colorScheme="primary">
-        <Sparkles className="!w-4 !h-4" />
+      <Button onClick={onAnalyze} disabled={loading} colorScheme="primary" size="sm">
+        <Sparkles className="!w-3.5 !h-3.5" />
         {loading ? "Analyzing…" : "Analyze Page"}
       </Button>
-      <div className="flex flex-wrap justify-center gap-2 text-xs text-muted-foreground">
-        <span>Live field read</span>
-        <span>•</span>
-        <span>Rules engine</span>
-        <span>•</span>
-        <span>Claude AI</span>
-        <span>•</span>
-        <span>Field write-back</span>
+      <div className="flex flex-wrap justify-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+        {["Live fields", "Rules engine", "AI analysis", "Write-back"].map((step, i, arr) => (
+          <span key={step} className="flex items-center gap-1.5">
+            <span>{step}</span>
+            {i < arr.length - 1 && <span className="text-border">›</span>}
+          </span>
+        ))}
       </div>
     </div>
   );
@@ -385,51 +365,33 @@ function EmptyState({
 
 function AnalysisResults({
   analysis,
-  pageRoute,
-  siteName,
+  layoutJson,
   onReanalyze,
   reanalyzing,
   onApplyFix,
   applyingFixId,
 }: {
   analysis: ContentAnalysis;
-  pageRoute: string;
-  siteName: string;
+  layoutJson?: string;
   onReanalyze: () => void;
   reanalyzing: boolean;
   onApplyFix: (finding: Finding) => Promise<void>;
   applyingFixId: string | null;
 }) {
-  const [downloading, setDownloading] = useState(false);
-  const [downloadError, setDownloadError] = useState<string | null>(null);
-  const [downloadingLayout, setDownloadingLayout] = useState(false);
+  const [showLayoutJson, setShowLayoutJson] = useState(false);
+  const [copiedLayout, setCopiedLayout] = useState(false);
 
   const critical = analysis.findings.filter((f) => f.severity === "critical").length;
   const warnings = analysis.findings.filter((f) => f.severity === "warning").length;
   const suggestions = analysis.findings.filter((f) => f.severity === "suggestion").length;
 
-  const handleDownload = async () => {
-    setDownloading(true);
-    setDownloadError(null);
-    try {
-      await downloadPageHtml(pageRoute, analysis.pageTitle);
-    } catch (err) {
-      setDownloadError(err instanceof Error ? err.message : "Download failed");
-    } finally {
-      setDownloading(false);
-    }
-  };
+  const prettyJson = layoutJson ? prettyLayoutJson(layoutJson) : null;
 
-  const handleLayoutDownload = async () => {
-    setDownloadingLayout(true);
-    setDownloadError(null);
-    try {
-      await downloadLayoutJson(siteName, pageRoute, analysis.language, analysis.pageTitle);
-    } catch (err) {
-      setDownloadError(err instanceof Error ? err.message : "Layout JSON download failed");
-    } finally {
-      setDownloadingLayout(false);
-    }
+  const handleCopyLayoutJson = async () => {
+    if (!prettyJson) return;
+    await copyToClipboardWithFallback(prettyJson);
+    setCopiedLayout(true);
+    setTimeout(() => setCopiedLayout(false), 2000);
   };
 
   return (
@@ -499,18 +461,27 @@ function AnalysisResults({
 
       {/* Footer: meta + actions */}
       <div className="space-y-3">
-        <div className="rounded-md border bg-muted/30 px-3 py-2.5 text-xs text-muted-foreground space-y-1">
-          <p><span className="font-medium text-foreground">Page</span> <span className="font-mono">{analysis.pageTitle}</span></p>
-          <p><span className="font-medium text-foreground">Path</span> <span className="font-mono break-all">{analysis.itemPath}</span></p>
-          <p><span className="font-medium text-foreground">Template</span> {analysis.pageType}</p>
-          <p><span className="font-medium text-foreground">Language</span> {analysis.language.toUpperCase()}</p>
-          <p><span className="font-medium text-foreground">Analyzed</span> {analysis.analyzedAt.toLocaleTimeString()}</p>
+        <div className="rounded-lg border bg-muted/40 divide-y divide-border text-xs">
+          {[
+            { label: "Page", value: analysis.pageTitle, mono: true },
+            { label: "Path", value: analysis.itemPath, mono: true, breakAll: true },
+            { label: "Template", value: analysis.pageType },
+            { label: "Language", value: analysis.language.toUpperCase() },
+            { label: "Analyzed", value: analysis.analyzedAt.toLocaleTimeString() },
+          ].map(({ label, value, mono, breakAll }) => (
+            <div key={label} className="flex gap-2 px-3 py-1.5">
+              <span className="w-16 shrink-0 text-muted-foreground">{label}</span>
+              <span className={`text-foreground ${mono ? "font-mono" : ""} ${breakAll ? "break-all" : "truncate"}`}>
+                {value}
+              </span>
+            </div>
+          ))}
         </div>
 
         <div className="flex flex-wrap gap-2">
           <Button
             variant="outline"
-            colorScheme="neutral"
+            colorScheme="primary"
             size="sm"
             onClick={onReanalyze}
             disabled={reanalyzing}
@@ -518,39 +489,38 @@ function AnalysisResults({
             <RefreshCw className={`!w-3.5 !h-3.5 ${reanalyzing ? "animate-spin" : ""}`} />
             {reanalyzing ? "Re-analyzing…" : "Re-analyze"}
           </Button>
-          {SITE_URL ? (
+          {prettyJson && (
             <Button
               variant="outline"
               colorScheme="neutral"
               size="sm"
-              onClick={handleDownload}
-              disabled={downloading}
+              onClick={() => setShowLayoutJson((v) => !v)}
             >
-              {downloading ? (
-                <Loader2 className="!w-3.5 !h-3.5 animate-spin" />
-              ) : (
-                <Download className="!w-3.5 !h-3.5" />
-              )}
-              {downloading ? "Downloading…" : "Download Page HTML"}
-            </Button>
-          ) : null}
-          <Button
-            variant="outline"
-            colorScheme="neutral"
-            size="sm"
-            onClick={handleLayoutDownload}
-            disabled={downloadingLayout || !siteName || !pageRoute}
-          >
-            {downloadingLayout ? (
-              <Loader2 className="!w-3.5 !h-3.5 animate-spin" />
-            ) : (
               <Download className="!w-3.5 !h-3.5" />
-            )}
-            {downloadingLayout ? "Downloading…" : "Download Layout JSON"}
-          </Button>
+              {showLayoutJson ? "Hide Layout JSON" : "Layout JSON"}
+            </Button>
+          )}
         </div>
-        {downloadError && (
-          <p className="text-xs text-danger-500">{downloadError}</p>
+
+        {showLayoutJson && prettyJson && (
+          <div className="rounded-lg border bg-muted/40 overflow-hidden">
+            <div className="flex items-center justify-between gap-2 px-3 py-2 border-b border-border">
+              <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+                Layout JSON (presentationDetails)
+              </span>
+              <Button
+                size="xs"
+                variant="outline"
+                colorScheme="neutral"
+                onClick={handleCopyLayoutJson}
+              >
+                {copiedLayout ? "Copied!" : "Copy"}
+              </Button>
+            </div>
+            <pre className="text-xs font-mono p-3 overflow-auto max-h-64 leading-relaxed whitespace-pre-wrap break-all">
+              {prettyJson}
+            </pre>
+          </div>
         )}
       </div>
     </div>
@@ -718,6 +688,13 @@ export function ContentIntelligencePanel() {
           },
         });
 
+        // Reload the editor canvas so the saved value is visible immediately
+        try {
+          await client.mutate("pages.reloadCanvas");
+        } catch {
+          // Not fatal — canvas reload is best-effort
+        }
+
         // Mark applied locally
         setAnalysis((prev) =>
           prev
@@ -748,42 +725,46 @@ export function ContentIntelligencePanel() {
     undefined;
 
   return (
-    <Card style="outline" padding="md" className="w-full">
-      <CardHeader>
+    <Card style="outline" padding="md" className="w-full font-sans">
+      <CardHeader className="pb-3">
         <div className="flex items-start justify-between gap-2">
-          <div>
-            <CardTitle className="flex items-center gap-2 text-base">
+          <div className="flex items-start gap-2.5">
+            <div className="mt-0.5 rounded-md bg-primary-bg p-1.5">
               <Sparkles className="h-4 w-4 text-primary-fg" />
-              Sitecore AI Content Intelligence
-            </CardTitle>
-            <CardDescription className="mt-1">
-              Page context panel — quality scoring &amp; field-level AI recommendations
-            </CardDescription>
+            </div>
+            <div>
+              <CardTitle className="text-sm font-semibold leading-tight">
+                AI Content Intelligence
+              </CardTitle>
+              <CardDescription className="text-xs mt-0.5">
+                SEO, accessibility &amp; editorial quality analysis
+              </CardDescription>
+            </div>
           </div>
           <Badge colorScheme="primary" size="sm">v1.0</Badge>
         </div>
 
         {pageInfo && (
-          <div className="mt-2 flex flex-wrap gap-1.5">
+          <div className="mt-2.5 pt-2.5 border-t border-border flex flex-wrap gap-1.5">
+            {typeof siteInfo?.name === "string" && siteInfo.name && (
+              <Badge colorScheme="neutral" size="sm">{siteInfo.name}</Badge>
+            )}
+            {template?.name && (
+              <Badge colorScheme="neutral" size="sm">{template.name}</Badge>
+            )}
             {typeof pageInfo.language === "string" && pageInfo.language && (
               <Badge colorScheme="neutral" size="sm">
                 {pageInfo.language.toUpperCase()}
               </Badge>
             )}
-            {template?.name && (
-              <Badge colorScheme="neutral" size="sm">{template.name}</Badge>
-            )}
             {typeof pageInfo.version === "number" && pageInfo.version && (
               <Badge colorScheme="neutral" size="sm">v{String(pageInfo.version)}</Badge>
-            )}
-            {typeof siteInfo?.name === "string" && siteInfo.name && (
-              <Badge colorScheme="neutral" size="sm">{siteInfo.name}</Badge>
             )}
           </div>
         )}
       </CardHeader>
 
-      <CardContent className="space-y-4">
+      <CardContent className="space-y-4 pt-0">
         {error && (
           <Alert variant="danger">
             <AlertTitle>Error</AlertTitle>
@@ -797,7 +778,7 @@ export function ContentIntelligencePanel() {
 
         {sdkReady && !pageInfo && !analyzing && (
           <Alert variant="default">
-            <AlertTitle>Waiting for page context</AlertTitle>
+            <AlertTitle>No page selected</AlertTitle>
             <AlertDescription>
               Open a page in Sitecore Pages to begin analysis.
             </AlertDescription>
@@ -805,10 +786,10 @@ export function ContentIntelligencePanel() {
         )}
 
         {analyzing && (
-          <div>
-            <div className="flex items-center gap-2 mb-4 text-sm text-muted-foreground">
-              <Sparkles className="h-4 w-4 animate-pulse text-primary-fg" />
-              <span>{analyzeStep || "Analyzing…"}</span>
+          <div className="space-y-4">
+            <div className="flex items-center gap-2 rounded-md bg-primary-bg px-3 py-2.5 text-sm text-primary-fg">
+              <Sparkles className="h-3.5 w-3.5 animate-pulse shrink-0" />
+              <span className="font-medium">{analyzeStep || "Analyzing…"}</span>
             </div>
             <AnalysisSkeleton />
           </div>
@@ -825,8 +806,7 @@ export function ContentIntelligencePanel() {
         {!analyzing && analysis && (
           <AnalysisResults
             analysis={analysis}
-            pageRoute={(pageInfo?.route as string) ?? (pageInfo?.path as string) ?? ""}
-            siteName={(siteInfo?.name as string) ?? (process.env.NEXT_PUBLIC_DEFAULT_SITE_NAME ?? "")}
+            layoutJson={(pageInfo?.presentationDetails as string) || undefined}
             onReanalyze={runAnalysis}
             reanalyzing={analyzing}
             onApplyFix={applyFix}

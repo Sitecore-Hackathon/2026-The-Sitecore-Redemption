@@ -66,7 +66,19 @@ function FindingCard({
   const [copied, setCopied] = useState(false);
 
   const copyToClipboard = async (text: string) => {
-    await navigator.clipboard.writeText(text);
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      // Fallback for iframe / non-HTTPS contexts where clipboard API is unavailable
+      const ta = document.createElement("textarea");
+      ta.value = text;
+      ta.style.cssText = "position:fixed;top:0;left:0;opacity:0;pointer-events:none;";
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      document.execCommand("copy");
+      document.body.removeChild(ta);
+    }
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };

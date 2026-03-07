@@ -301,7 +301,7 @@
     --color-sidebar-border: var(--sidebar-border);
     --color-sidebar-ring: var(--sidebar-ring);
     --color-sonner-error: var(--destructive-background);
-    --font-sans: var(--font-sans);
+    --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
     --color-color-yellow-900: var(----color-yellow-900);
     --color-color-yellow-800: var(----color-yellow-800);
     --color-color-yellow-700: var(----color-yellow-700);

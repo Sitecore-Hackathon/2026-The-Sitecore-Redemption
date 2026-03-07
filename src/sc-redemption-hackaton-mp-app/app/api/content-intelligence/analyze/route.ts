@@ -83,6 +83,8 @@ function synthesisePageContent(req: AnalyzeRequest["pageData"]): string {
     return (ai === -1 ? 999 : ai) - (bi === -1 ? 999 : bi);
   });
 
+  const htmlFieldNames = new Set<string>();
+
   for (const f of sorted) {
     const val = f.value?.trim();
     if (!val) continue;
@@ -91,14 +93,33 @@ function synthesisePageContent(req: AnalyzeRequest["pageData"]): string {
     // Skip Sitecore-specific XML/JSON data fields (layout, image, link fields)
     // but KEEP HTML content fields like RichText (<p>, <h1>, etc.)
     if (/^(\{|<r[\s>]|<r\/>|<image[\s/>]|<link[\s/>]|<field[\s/>])/.test(val)) continue;
-    // Strip HTML tags for the AI — it needs the text, not the markup
-    const text = val.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+
+    const isHtml = /<[a-z][\s\S]*>/i.test(val);
+    if (isHtml) {
+      htmlFieldNames.add(f.name);
+      // Send raw HTML so the AI preserves existing tag structure in applyValue
+      if (val.length > 3000) {
+        lines.push(`${f.name} [HTML field]: [HTML content truncated — ${val.length} chars]`);
+      } else {
+        lines.push(`${f.name} [HTML field]: ${val}`);
+      }
+      continue;
+    }
+
+    // Plain text fields — send as-is
+    const text = val.replace(/\s+/g, " ").trim();
     if (!text) continue;
     if (text.length > 3000) {
       lines.push(`${f.name}: [content truncated — ${text.length} chars]`);
       continue;
     }
     lines.push(`${f.name}: ${text}`);
+  }
+
+  if (htmlFieldNames.size > 0) {
+    lines.push("");
+    lines.push(`=== HTML FIELDS (preserve all tags in applyValue) ===`);
+    lines.push([...htmlFieldNames].join(", "));
   }
 
   const result = lines.join("\n");
@@ -119,7 +140,8 @@ Rules:
 - ALWAYS flag any field that contains "Lorem ipsum" or other obvious placeholder/dummy text as a CRITICAL governance finding.
 - ALWAYS flag any field that contains repetitive, nonsensical, or clearly auto-generated filler text.
 - applyValue MUST be the complete replacement text ready to save to the field — not a description of what to write.
-- applyValue must respect the field's apparent type: plain text for title/meta fields, do not add HTML tags to plain text fields.
+- For fields marked [HTML field]: applyValue MUST preserve all existing HTML tags and structure. Only replace the text content inside tags. Never strip or add tags. Example: if the field contains "<h1>Old title</h1><p>Old text</p>", your applyValue must return "<h1>New title</h1><p>New text</p>" with the exact same tag structure.
+- For plain text fields (no [HTML field] marker): do not add any HTML tags — plain text only.
 - If a finding is about a missing field (empty value), applyValue should be the suggested content to add.
 - Maximum 8 findings total. Prioritise the most impactful.
 - Return ONLY a valid JSON array — no markdown fences, no explanation outside the array.
