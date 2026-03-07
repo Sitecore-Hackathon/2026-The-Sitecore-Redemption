@@ -9,23 +9,26 @@ import {
   CollapsibleTrigger,
 } from "@/components/ui/collapsible";
 import type { Finding, Severity } from "@/lib/content-intelligence/types";
-import { ChevronDown, ChevronRight, Copy, Sparkles } from "lucide-react";
+import {
+  CheckCircle,
+  ChevronDown,
+  ChevronRight,
+  Copy,
+  Loader2,
+  Pencil,
+  Sparkles,
+} from "lucide-react";
 import { useState } from "react";
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-function getSeverityColorScheme(
-  s: Severity,
-): "danger" | "warning" | "primary" {
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function getSeverityColorScheme(s: Severity): "danger" | "warning" | "primary" {
   if (s === "critical") return "danger";
   if (s === "warning") return "warning";
   return "primary";
 }
 
-function getSeverityAlertVariant(
-  s: Severity,
-): "danger" | "warning" | "default" {
+function getSeverityAlertVariant(s: Severity): "danger" | "warning" | "default" {
   if (s === "critical") return "danger";
   if (s === "warning") return "warning";
   return "default";
@@ -48,10 +51,17 @@ function getCategoryLabel(category: Finding["category"]): string {
   return map[category];
 }
 
-// ---------------------------------------------------------------------------
-// Single finding card
-// ---------------------------------------------------------------------------
-function FindingCard({ finding }: { finding: Finding }) {
+// ─── Single finding card ──────────────────────────────────────────────────────
+
+function FindingCard({
+  finding,
+  onApplyFix,
+  applyingFixId,
+}: {
+  finding: Finding;
+  onApplyFix?: (finding: Finding) => Promise<void>;
+  applyingFixId: string | null;
+}) {
   const [open, setOpen] = useState(false);
   const [copied, setCopied] = useState(false);
 
@@ -60,6 +70,10 @@ function FindingCard({ finding }: { finding: Finding }) {
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
+
+  const isApplying = applyingFixId === finding.id;
+  const canApply =
+    !!finding.fieldId && finding.applyValue !== undefined && !finding.applied;
 
   return (
     <Collapsible open={open} onOpenChange={setOpen}>
@@ -83,6 +97,18 @@ function FindingCard({ finding }: { finding: Finding }) {
                   AI
                 </Badge>
               )}
+              {finding.fieldName && (
+                <Badge colorScheme="neutral" size="sm">
+                  <Pencil className="!w-2.5 !h-2.5" />
+                  {finding.fieldName}
+                </Badge>
+              )}
+              {finding.applied && (
+                <Badge colorScheme="success" size="sm">
+                  <CheckCircle className="!w-2.5 !h-2.5" />
+                  Applied
+                </Badge>
+              )}
             </div>
             <p className="text-sm font-medium leading-snug">{finding.title}</p>
           </div>
@@ -98,6 +124,16 @@ function FindingCard({ finding }: { finding: Finding }) {
 
       <CollapsibleContent>
         <div className="px-4 pb-4 space-y-3">
+          {/* Current value */}
+          {finding.currentValue !== undefined && finding.currentValue !== "" && (
+            <div className="bg-muted rounded-md px-3 py-2">
+              <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-1">
+                Current field value
+              </p>
+              <p className="text-sm font-mono break-all">{finding.currentValue}</p>
+            </div>
+          )}
+
           {/* Evidence */}
           <div className="bg-muted rounded-md px-3 py-2">
             <p className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-1">
@@ -106,12 +142,12 @@ function FindingCard({ finding }: { finding: Finding }) {
             <p className="text-sm">{finding.evidence}</p>
           </div>
 
-          {/* Standard basis */}
+          {/* Standard */}
           {finding.standard && (
-            <div className="text-xs text-muted-foreground">
+            <p className="text-xs text-muted-foreground">
               <span className="font-semibold">Standard: </span>
               {finding.standard}
-            </div>
+            </p>
           )}
 
           {/* Rationale */}
@@ -130,32 +166,79 @@ function FindingCard({ finding }: { finding: Finding }) {
             <p className="text-sm">{finding.suggestedFix}</p>
           </div>
 
-          {/* AI rewrite */}
-          {finding.aiRewrite && (
+          {/* AI rewrite + actions */}
+          {finding.applyValue !== undefined && (
             <div className="border border-primary-200 bg-primary-bg rounded-lg p-3 space-y-2">
               <div className="flex items-center gap-1.5">
                 <Sparkles className="h-3.5 w-3.5 text-primary-fg" />
                 <p className="text-xs font-semibold text-primary-fg uppercase tracking-wide">
-                  AI Suggested Rewrite
+                  {finding.source === "ai" ? "AI Suggested Rewrite" : "Suggested Field Value"}
                 </p>
                 <Badge colorScheme="primary" size="sm">
-                  Confidence:{" "}
-                  {finding.confidence.charAt(0).toUpperCase() +
-                    finding.confidence.slice(1)}
+                  {finding.confidence.charAt(0).toUpperCase() + finding.confidence.slice(1)}{" "}
+                  confidence
                 </Badge>
               </div>
               <pre className="text-sm text-primary-fg whitespace-pre-wrap font-sans leading-relaxed">
-                {finding.aiRewrite}
+                {finding.applyValue}
               </pre>
-              <Button
-                size="xs"
-                variant="outline"
-                colorScheme="primary"
-                onClick={() => copyToClipboard(finding.aiRewrite!)}
-              >
-                <Copy className="!w-3 !h-3" />
-                {copied ? "Copied!" : "Copy"}
-              </Button>
+
+              <div className="flex flex-wrap gap-2">
+                {/* Copy button */}
+                <Button
+                  size="xs"
+                  variant="outline"
+                  colorScheme="primary"
+                  onClick={() => copyToClipboard(finding.applyValue!)}
+                >
+                  <Copy className="!w-3 !h-3" />
+                  {copied ? "Copied!" : "Copy"}
+                </Button>
+
+                {/* Apply Fix — writes directly to the Sitecore field */}
+                {canApply && onApplyFix && (
+                  <Button
+                    size="xs"
+                    variant="default"
+                    colorScheme="primary"
+                    disabled={isApplying}
+                    onClick={() => onApplyFix(finding)}
+                  >
+                    {isApplying ? (
+                      <>
+                        <Loader2 className="!w-3 !h-3 animate-spin" />
+                        Saving…
+                      </>
+                    ) : (
+                      <>
+                        <Pencil className="!w-3 !h-3" />
+                        Apply Fix
+                      </>
+                    )}
+                  </Button>
+                )}
+
+                {finding.applied && (
+                  <Badge colorScheme="success">
+                    <CheckCircle className="!w-3 !h-3" />
+                    Saved to Sitecore
+                  </Badge>
+                )}
+              </div>
+
+              {canApply && (
+                <p className="text-xs text-muted-foreground">
+                  <span className="font-medium">Field:</span>{" "}
+                  <span className="font-mono">{finding.fieldName}</span>
+                  {" — "}Apply Fix writes this value directly to the Sitecore field.
+                </p>
+              )}
+
+              {!canApply && !finding.applied && finding.applyValue !== undefined && (
+                <p className="text-xs text-muted-foreground">
+                  This field could not be matched to a Sitecore field ID. Use the Copy button and paste manually.
+                </p>
+              )}
             </div>
           )}
         </div>
@@ -164,15 +247,18 @@ function FindingCard({ finding }: { finding: Finding }) {
   );
 }
 
-// ---------------------------------------------------------------------------
-// Severity group
-// ---------------------------------------------------------------------------
+// ─── Severity group ───────────────────────────────────────────────────────────
+
 function SeverityGroup({
   severity,
   findings,
+  onApplyFix,
+  applyingFixId,
 }: {
   severity: Severity;
   findings: Finding[];
+  onApplyFix?: (finding: Finding) => Promise<void>;
+  applyingFixId: string | null;
 }) {
   if (findings.length === 0) return null;
 
@@ -183,27 +269,36 @@ function SeverityGroup({
           {getSeverityLabel(severity)} ({findings.length})
         </AlertTitle>
         <AlertDescription>
-          {severity === "critical" &&
-            "These issues must be resolved before publishing."}
-          {severity === "warning" &&
-            "These issues should be addressed to improve quality."}
-          {severity === "suggestion" &&
-            "Optional improvements to enhance content."}
+          {severity === "critical" && "These issues must be resolved before publishing."}
+          {severity === "warning" && "These issues should be addressed to improve quality."}
+          {severity === "suggestion" && "Optional improvements to enhance content."}
         </AlertDescription>
       </Alert>
       <div className="divide-y divide-border rounded-lg border overflow-hidden">
         {findings.map((f) => (
-          <FindingCard key={f.id} finding={f} />
+          <FindingCard
+            key={f.id}
+            finding={f}
+            onApplyFix={onApplyFix}
+            applyingFixId={applyingFixId}
+          />
         ))}
       </div>
     </div>
   );
 }
 
-// ---------------------------------------------------------------------------
-// Public component
-// ---------------------------------------------------------------------------
-export function FindingsList({ findings }: { findings: Finding[] }) {
+// ─── Public component ─────────────────────────────────────────────────────────
+
+export function FindingsList({
+  findings,
+  onApplyFix,
+  applyingFixId,
+}: {
+  findings: Finding[];
+  onApplyFix?: (finding: Finding) => Promise<void>;
+  applyingFixId: string | null;
+}) {
   const critical = findings.filter((f) => f.severity === "critical");
   const warnings = findings.filter((f) => f.severity === "warning");
   const suggestions = findings.filter((f) => f.severity === "suggestion");
@@ -212,18 +307,31 @@ export function FindingsList({ findings }: { findings: Finding[] }) {
     return (
       <Alert variant="success">
         <AlertTitle>No issues found</AlertTitle>
-        <AlertDescription>
-          This page passed all content quality checks.
-        </AlertDescription>
+        <AlertDescription>This page passed all content quality checks.</AlertDescription>
       </Alert>
     );
   }
 
   return (
     <div className="space-y-4">
-      <SeverityGroup severity="critical" findings={critical} />
-      <SeverityGroup severity="warning" findings={warnings} />
-      <SeverityGroup severity="suggestion" findings={suggestions} />
+      <SeverityGroup
+        severity="critical"
+        findings={critical}
+        onApplyFix={onApplyFix}
+        applyingFixId={applyingFixId}
+      />
+      <SeverityGroup
+        severity="warning"
+        findings={warnings}
+        onApplyFix={onApplyFix}
+        applyingFixId={applyingFixId}
+      />
+      <SeverityGroup
+        severity="suggestion"
+        findings={suggestions}
+        onApplyFix={onApplyFix}
+        applyingFixId={applyingFixId}
+      />
     </div>
   );
 }

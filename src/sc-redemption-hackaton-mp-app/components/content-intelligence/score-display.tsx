@@ -55,7 +55,7 @@ export function ScoreRing({ score, grade }: ScoreRingProps) {
             r={radius}
             fill="none"
             strokeWidth="10"
-            stroke="var(--color-gray-100)"
+            stroke="var(--color-border)"
           />
           {/* Progress arc — starts from top (rotated -90deg) */}
           <circle
@@ -120,7 +120,7 @@ export function CategoryBars({ categories }: CategoryBarsProps) {
                 {cat.score}
               </Badge>
             </div>
-            <div className="w-full bg-gray-100 rounded-full h-1.5">
+            <div className="w-full bg-border rounded-full h-1.5">
               <div
                 className="h-1.5 rounded-full transition-all duration-700"
                 style={{ width: `${cat.score}%`, backgroundColor: color }}

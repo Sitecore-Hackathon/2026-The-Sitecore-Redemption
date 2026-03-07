@@ -2,51 +2,382 @@ import type {
   Category,
   CategoryScore,
   ContentAnalysis,
+  FieldData,
   Finding,
   Grade,
+  SitecorePageData,
 } from "./types";
 
-// ---------------------------------------------------------------------------
-// Mock page data
-// In production this would be fetched via:
-//   client.query("xmc.item.getFields", { itemId: appContext.item.id })
-// then run against actual Sitecore field values.
-// ---------------------------------------------------------------------------
-const MOCK_PAGE = {
-  title: "Retirement Planning Solutions",
-  metaTitle: "Retirement Planning Solutions | Sitecore Financial",
-  metaDescription: "", // MISSING — triggers critical SEO finding
-  h1Tags: ["Retirement Planning Solutions", "Start Planning Today"], // Two H1s
-  headings: [
-    "Our Approach",
-    "Investment Options",
-    "Why Choose Us",
-    "Contact Us",
-  ],
-  bodyWordCount: 312,
-  bodyCopy: `We provide comprehensive retirement planning solutions to meet your needs.
-    Our services are designed to be personalized. Plans are crafted by our team.
-    Investment options are reviewed annually. Your future is secured by our advisors.
-    We believe in building long-term relationships based on trust and transparency.`,
-  images: [
-    { alt: "", src: "hero-retirement.jpg" }, // MISSING alt — critical
-    { alt: "", src: "advisors-team.jpg" }, // MISSING alt — critical
-    { alt: "graph", src: "investment-chart.jpg" }, // Generic alt — AI suggestion
-  ],
-  internalLinks: 0, // No internal links — SEO warning
-  externalLinks: 2,
-  hasSummary: false, // No excerpt / summary — completeness warning
-  hasPrimaryCTA: true,
-  hasTaxonomy: false, // No taxonomy assigned — completeness warning
-  hasStructuredData: false, // No schema markup — SEO suggestion
-  passiveVoicePercentage: 62, // High passive voice — readability warning
-  pageType: "Financial Services Landing",
-  language: "en",
-};
+// ─── Field name lookup ────────────────────────────────────────────────────────
 
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
+/**
+ * Finds a field by one of its possible names (case-insensitive).
+ * Covers common XM Cloud / SXA field naming conventions.
+ */
+function findField(
+  fields: FieldData[],
+  ...candidates: string[]
+): FieldData | undefined {
+  for (const name of candidates) {
+    const f = fields.find(
+      (f) => f.name.toLowerCase() === name.toLowerCase(),
+    );
+    if (f) return f;
+  }
+  return undefined;
+}
+
+/** Returns true if a field exists and has a non-empty trimmed value. */
+function hasValue(field: FieldData | undefined): boolean {
+  return !!field?.value?.trim();
+}
+
+/** Counts words in a string (strips HTML tags first). */
+function wordCount(text: string): number {
+  return text
+    .replace(/<[^>]*>/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .split(" ")
+    .filter(Boolean).length;
+}
+
+/** Returns % of sentences that are likely passive voice (simple heuristic). */
+function passiveVoicePercent(text: string): number {
+  const clean = text.replace(/<[^>]*>/g, " ");
+  const sentences = clean.split(/[.!?]+/).filter((s) => s.trim().length > 5);
+  if (sentences.length === 0) return 0;
+  const passivePattern =
+    /\b(is|are|was|were|be|been|being)\s+\w+ed\b/i;
+  const passive = sentences.filter((s) => passivePattern.test(s)).length;
+  return Math.round((passive / sentences.length) * 100);
+}
+
+// ─── Rules engine ─────────────────────────────────────────────────────────────
+
+export function runRulesEngine(data: SitecorePageData): Finding[] {
+  const { fields, language } = data;
+  const findings: Finding[] = [];
+  let seq = 0;
+  const id = (prefix: string) => `${prefix}-${++seq}`;
+
+  // ── SEO ────────────────────────────────────────────────────────────────────
+
+  const metaDesc = findField(
+    fields,
+    "MetaDescription",
+    "Meta Description",
+    "OgDescription",
+    "OG Description",
+    "Description",
+  );
+  if (!hasValue(metaDesc)) {
+    findings.push({
+      id: id("seo"),
+      category: "seo",
+      severity: "critical",
+      source: "rules",
+      confidence: "high",
+      title: "Meta description is missing",
+      evidence: 'Field "MetaDescription" is empty or not present',
+      rationale:
+        "Search engines display meta descriptions in results pages. A missing description forces auto-generated snippets that reduce click-through rate.",
+      suggestedFix:
+        "Add a 150–160 character meta description that clearly states the page benefit and includes the primary keyword.",
+      standard: "Google Search Central — Snippet best practices",
+      fieldName: metaDesc?.name ?? "MetaDescription",
+      fieldId: metaDesc?.id,
+      currentValue: metaDesc?.value ?? "",
+    });
+  } else if (
+    metaDesc &&
+    (metaDesc.value.length < 70 || metaDesc.value.length > 165)
+  ) {
+    findings.push({
+      id: id("seo"),
+      category: "seo",
+      severity: "warning",
+      source: "rules",
+      confidence: "high",
+      title: `Meta description is ${metaDesc.value.length < 70 ? "too short" : "too long"} (${metaDesc.value.length} chars)`,
+      evidence: `Current meta description: "${metaDesc.value.substring(0, 80)}…"`,
+      rationale:
+        "Google typically displays 155–160 characters. Descriptions shorter than 70 characters leave unused ranking signal; longer ones are truncated.",
+      suggestedFix:
+        "Rewrite the meta description to be 150–160 characters — specific, benefit-led, and keyword-rich.",
+      standard: "Google Search Central — Snippet best practices",
+      fieldName: metaDesc.name,
+      fieldId: metaDesc.id,
+      currentValue: metaDesc.value,
+    });
+  }
+
+  const title = findField(
+    fields,
+    "Title",
+    "Browser Title",
+    "MetaTitle",
+    "Meta Title",
+    "OgTitle",
+    "OG Title",
+    "NavigationTitle",
+    "Navigation Title",
+  );
+  if (!hasValue(title)) {
+    findings.push({
+      id: id("seo"),
+      category: "seo",
+      severity: "critical",
+      source: "rules",
+      confidence: "high",
+      title: "Page title is missing",
+      evidence: "No Title field found with a value",
+      rationale:
+        "The page title is the most important on-page SEO signal and is shown in search engine results and browser tabs.",
+      suggestedFix:
+        "Add a clear, descriptive title (50–60 characters) that includes the primary keyword.",
+      standard: "Google Search Central — Title best practices",
+      fieldName: "Title",
+    });
+  } else if (title && (title.value.length < 10 || title.value.length > 70)) {
+    findings.push({
+      id: id("seo"),
+      category: "seo",
+      severity: "warning",
+      source: "rules",
+      confidence: "high",
+      title: `Page title is ${title.value.length < 10 ? "too short" : "too long"} (${title.value.length} chars)`,
+      evidence: `Current title: "${title.value}"`,
+      rationale:
+        "Titles between 50–60 characters perform best in search results. Shorter titles under-utilise ranking space; longer ones are truncated.",
+      suggestedFix: "Rewrite the title to be 50–60 characters.",
+      standard: "Google Search Central — Title best practices",
+      fieldName: title.name,
+      fieldId: title.id,
+      currentValue: title.value,
+    });
+  }
+
+  const keywords = findField(
+    fields,
+    "Keywords",
+    "Meta Keywords",
+    "MetaKeywords",
+  );
+  if (!hasValue(keywords)) {
+    findings.push({
+      id: id("seo"),
+      category: "seo",
+      severity: "suggestion",
+      source: "rules",
+      confidence: "medium",
+      title: "Meta keywords field is empty",
+      evidence: "No Keywords field with a value found",
+      rationale:
+        "While Google ignores meta keywords, Sitecore's site search and personalisation rules may use them for content targeting.",
+      suggestedFix:
+        "Add 5–10 relevant keywords that represent the page topic and audience intent.",
+      fieldName: keywords?.name ?? "Keywords",
+      fieldId: keywords?.id,
+      currentValue: keywords?.value ?? "",
+    });
+  }
+
+  // ── ACCESSIBILITY ──────────────────────────────────────────────────────────
+
+  // Look for any image alt-text-style fields that are empty
+  const altFields = fields.filter(
+    (f) =>
+      /\balt\b/i.test(f.name) &&
+      !hasValue(f),
+  );
+  if (altFields.length > 0) {
+    findings.push({
+      id: id("acc"),
+      category: "accessibility",
+      severity: "critical",
+      source: "rules",
+      confidence: "high",
+      title: `${altFields.length} image alt text field${altFields.length > 1 ? "s are" : " is"} empty`,
+      evidence: `Fields without alt text: ${altFields.map((f) => `"${f.name}"`).join(", ")}`,
+      rationale:
+        "Screen readers cannot describe images to visually impaired users without descriptive alt text. This is a WCAG Level A failure.",
+      suggestedFix:
+        'Describe each image concisely (e.g. "Two advisors reviewing a retirement plan in an office"). Use alt="" for purely decorative images.',
+      standard: "WCAG 2.2 — Success Criterion 1.1.1 (Non-text Content, Level A)",
+      fieldName: altFields[0].name,
+      fieldId: altFields[0].id,
+      currentValue: altFields[0].value,
+    });
+  }
+
+  // ── READABILITY ────────────────────────────────────────────────────────────
+
+  const bodyField = findField(
+    fields,
+    "Text",
+    "Body",
+    "Content",
+    "RichText",
+    "Rich Text",
+    "Body Copy",
+    "BodyCopy",
+  );
+
+  if (bodyField && hasValue(bodyField)) {
+    const wc = wordCount(bodyField.value);
+    if (wc < 100) {
+      findings.push({
+        id: id("read"),
+        category: "readability",
+        severity: "warning",
+        source: "rules",
+        confidence: "high",
+        title: `Body content is very thin (${wc} words)`,
+        evidence: `Field "${bodyField.name}" contains approximately ${wc} words`,
+        rationale:
+          "Pages with fewer than 100 words of body content are less likely to rank well and may be flagged as thin content by search engines.",
+        suggestedFix:
+          "Expand the body copy to at least 250 words. Add context, supporting evidence, and relevant detail for the target audience.",
+        fieldName: bodyField.name,
+        fieldId: bodyField.id,
+        currentValue: bodyField.value,
+      });
+    }
+
+    const pvPercent = passiveVoicePercent(bodyField.value);
+    if (pvPercent > 40) {
+      findings.push({
+        id: id("read"),
+        category: "readability",
+        severity: "warning",
+        source: "rules",
+        confidence: "medium",
+        title: `High passive voice usage (${pvPercent}% of sentences)`,
+        evidence: `Passive voice detected in "${bodyField.name}" field`,
+        rationale:
+          "Passive voice makes content impersonal and harder to scan. For financial or trust-sensitive content this reduces engagement.",
+        suggestedFix:
+          'Replace passive constructions with active voice: "Our team reviews plans" instead of "Plans are reviewed by our team."',
+        fieldName: bodyField.name,
+        fieldId: bodyField.id,
+        currentValue: bodyField.value,
+      });
+    }
+  } else if (!bodyField) {
+    findings.push({
+      id: id("read"),
+      category: "readability",
+      severity: "warning",
+      source: "rules",
+      confidence: "medium",
+      title: "No recognised body content field found",
+      evidence:
+        'No field named "Text", "Body", "Content", or "RichText" found on this item',
+      rationale:
+        "The rules engine cannot evaluate body content quality without a recognised body field. Verify the template field names.",
+      suggestedFix:
+        "Ensure the page template includes a body/rich-text field, and that it is populated.",
+    });
+  }
+
+  // ── COMPLETENESS ───────────────────────────────────────────────────────────
+
+  const summary = findField(
+    fields,
+    "Summary",
+    "Short Description",
+    "ShortDescription",
+    "Abstract",
+    "Teaser",
+    "Excerpt",
+    "Intro",
+    "Introduction",
+  );
+  if (!hasValue(summary)) {
+    findings.push({
+      id: id("comp"),
+      category: "completeness",
+      severity: "warning",
+      source: "rules",
+      confidence: "high",
+      title: "Page summary / excerpt field is empty",
+      evidence: "No populated summary, abstract, or teaser field found",
+      rationale:
+        "Summary fields power site search snippets, content listing cards, social sharing previews, and personalisation surfaces. An empty summary means these fall back to truncated body copy.",
+      suggestedFix:
+        "Write a 1–2 sentence summary (under 200 characters) that captures the page purpose and target audience.",
+      fieldName: summary?.name ?? "Summary",
+      fieldId: summary?.id,
+      currentValue: summary?.value ?? "",
+    });
+  }
+
+  // Check for language-specific issues (non-English)
+  if (language && language.toLowerCase() !== "en" && language.toLowerCase() !== "en-us") {
+    const langTitle = findField(fields, "Title", "NavigationTitle");
+    if (langTitle && /^[a-zA-Z\s]+$/.test(langTitle.value) && langTitle.value.trim().length > 5) {
+      findings.push({
+        id: id("comp"),
+        category: "completeness",
+        severity: "suggestion",
+        source: "rules",
+        confidence: "medium",
+        title: `Title appears to be in English for a ${language} page`,
+        evidence: `Field "${langTitle.name}" value: "${langTitle.value}" (detected language: ${language})`,
+        rationale:
+          "Page titles in the wrong language hurt localised search rankings and confuse screen readers set to the page language.",
+        suggestedFix: `Translate the title to ${language}.`,
+        fieldName: langTitle.name,
+        fieldId: langTitle.id,
+        currentValue: langTitle.value,
+      });
+    }
+  }
+
+  return findings;
+}
+
+// ─── Scoring engine ───────────────────────────────────────────────────────────
+
+const CATEGORY_DEFS: Array<{
+  category: Category;
+  label: string;
+  weight: number;
+  description: string;
+}> = [
+  {
+    category: "accessibility",
+    label: "Accessibility",
+    weight: 30,
+    description: "WCAG 2.2-aligned checks",
+  },
+  {
+    category: "seo",
+    label: "SEO & Discoverability",
+    weight: 25,
+    description: "Google Search Central guidance",
+  },
+  {
+    category: "readability",
+    label: "Readability & Clarity",
+    weight: 20,
+    description: "Editorial heuristics",
+  },
+  {
+    category: "completeness",
+    label: "Content Completeness",
+    weight: 15,
+    description: "Business rule checks",
+  },
+  {
+    category: "governance",
+    label: "Brand & Governance",
+    weight: 10,
+    description: "Org-specific rules",
+  },
+];
+
 function computeGrade(score: number): Grade {
   if (score >= 90) return "A";
   if (score >= 75) return "B";
@@ -55,250 +386,7 @@ function computeGrade(score: number): Grade {
   return "F";
 }
 
-// ---------------------------------------------------------------------------
-// Rules engine — deterministic checks
-// ---------------------------------------------------------------------------
-function buildFindings(): Finding[] {
-  const findings: Finding[] = [];
-
-  // ── ACCESSIBILITY ─────────────────────────────────────────────────────────
-
-  const missingAlt = MOCK_PAGE.images.filter((i) => !i.alt);
-  if (missingAlt.length > 0) {
-    findings.push({
-      id: "acc-1",
-      category: "accessibility",
-      severity: "critical",
-      title: `${missingAlt.length} image${missingAlt.length > 1 ? "s are" : " is"} missing alternative text`,
-      evidence: `Images without alt text: ${missingAlt.map((i) => i.src).join(", ")}`,
-      rationale:
-        "Screen readers cannot convey image content to visually impaired users without descriptive alt text. This is a WCAG Level A failure.",
-      suggestedFix:
-        'Add descriptive alt text to each meaningful image. Decorative images should use an empty alt attribute (alt="").',
-      aiRewrite:
-        'hero-retirement.jpg → "A couple reviewing retirement savings documents with a financial advisor in a bright, modern office"\nadvisors-team.jpg → "Three certified financial advisors from Sitecore Financial seated at a conference table"',
-      standard: "WCAG 2.2 — Success Criterion 1.1.1 (Non-text Content, Level A)",
-      confidence: "high",
-      source: "rules",
-    });
-  }
-
-  if (MOCK_PAGE.h1Tags.length > 1) {
-    findings.push({
-      id: "acc-2",
-      category: "accessibility",
-      severity: "warning",
-      title: `Multiple H1 tags detected (${MOCK_PAGE.h1Tags.length} found)`,
-      evidence: `H1 tags found: "${MOCK_PAGE.h1Tags.join('", "')}"`,
-      rationale:
-        "A page should have exactly one H1 to define its primary topic. Multiple H1s disrupt heading hierarchy for screen reader users and weaken document structure.",
-      suggestedFix:
-        'Keep "Retirement Planning Solutions" as the sole H1. Convert "Start Planning Today" to an H2.',
-      standard:
-        "WCAG 2.2 — Success Criterion 1.3.1 (Info and Relationships, Level A)",
-      confidence: "high",
-      source: "rules",
-    });
-  }
-
-  // AI finding — generic alt text
-  const genericAlt = MOCK_PAGE.images.filter(
-    (i) => i.alt && i.alt.length < 8,
-  );
-  if (genericAlt.length > 0) {
-    findings.push({
-      id: "acc-3",
-      category: "accessibility",
-      severity: "suggestion",
-      title: `Alt text on ${genericAlt.map((i) => i.src).join(", ")} is too generic`,
-      evidence: `Current alt text: "${genericAlt.map((i) => i.alt).join('", "')}"`,
-      rationale:
-        "Generic alt text like \"graph\" provides no context about what the image shows, failing users who rely on assistive technology.",
-      suggestedFix:
-        "Describe the chart subject and its relevance to the page topic.",
-      aiRewrite:
-        '"Bar chart comparing projected retirement savings growth over 20 years across three contribution levels: conservative, moderate, and aggressive"',
-      standard: "WCAG-aligned image alternative guidance (WAI)",
-      confidence: "high",
-      source: "ai",
-    });
-  }
-
-  // ── SEO / DISCOVERABILITY ─────────────────────────────────────────────────
-
-  if (!MOCK_PAGE.metaDescription) {
-    findings.push({
-      id: "seo-1",
-      category: "seo",
-      severity: "critical",
-      title: "Meta description is not set",
-      evidence: "Meta description field is empty",
-      rationale:
-        "Search engines display meta descriptions in results pages. A missing description forces an auto-generated snippet that is often truncated or off-topic, reducing click-through rate.",
-      suggestedFix:
-        "Add a concise, keyword-rich meta description between 150–160 characters that clearly states the page benefit.",
-      aiRewrite:
-        '"Explore personalized retirement planning solutions from Sitecore Financial. Our certified advisors help you build a secure financial future — start your free consultation today."',
-      standard: "Google Search Central — Snippet best practices",
-      confidence: "high",
-      source: "rules",
-    });
-  }
-
-  if (MOCK_PAGE.internalLinks === 0) {
-    findings.push({
-      id: "seo-2",
-      category: "seo",
-      severity: "warning",
-      title: "Page contains no internal links",
-      evidence: `Internal link count: ${MOCK_PAGE.internalLinks}`,
-      rationale:
-        "Internal links help search engines discover your site structure and distribute page authority. They also guide users to related content, reducing bounce rate.",
-      suggestedFix:
-        "Add 2–4 internal links to related pages such as investment options, a financial calculator, or advisor profiles.",
-      confidence: "high",
-      source: "rules",
-    });
-  }
-
-  if (!MOCK_PAGE.hasStructuredData) {
-    findings.push({
-      id: "seo-3",
-      category: "seo",
-      severity: "suggestion",
-      title: "No structured data (Schema.org) detected",
-      evidence: "No JSON-LD or microdata markup found on this template type",
-      rationale:
-        "Structured data helps search engines understand page content and can unlock rich results such as FAQs, breadcrumbs, or review stars in SERPs.",
-      suggestedFix:
-        'Add Schema.org "FinancialService" or "LocalBusiness" markup using JSON-LD. Consider making this a default on the Financial Services Landing template.',
-      standard: "Schema.org — FinancialService type",
-      confidence: "medium",
-      source: "rules",
-    });
-  }
-
-  // ── READABILITY / CLARITY ─────────────────────────────────────────────────
-
-  if (MOCK_PAGE.passiveVoicePercentage > 40) {
-    findings.push({
-      id: "read-1",
-      category: "readability",
-      severity: "warning",
-      title: `High passive voice usage (${MOCK_PAGE.passiveVoicePercentage}% of sentences)`,
-      evidence:
-        'Examples: "Plans are crafted by our team", "Investment options are reviewed annually", "Your future is secured by our advisors"',
-      rationale:
-        "Passive voice makes content feel impersonal and harder to scan, reducing trust and engagement — particularly for high-stakes financial decisions.",
-      suggestedFix:
-        'Rewrite in active voice: "Our team crafts personalized plans", "We review investment options annually", "Our advisors secure your future."',
-      confidence: "high",
-      source: "ai",
-    });
-  }
-
-  // AI finding — vague opening
-  findings.push({
-    id: "read-2",
-    category: "readability",
-    severity: "suggestion",
-    title: "Opening paragraph is vague and lacks audience specificity",
-    evidence:
-      '"We provide comprehensive retirement planning solutions to meet your needs."',
-    rationale:
-      "The opening line does not identify the target audience (adults 50+ planning retirement), differentiate the service, or communicate a clear benefit. Vague intros cause high-intent visitors to bounce.",
-    suggestedFix:
-      "Lead with the audience benefit and a specific differentiator relevant to the page intent.",
-    aiRewrite:
-      "\"Whether you're 10 years from retirement or ready to start withdrawing, our certified advisors build a personalized plan around your income goals, risk tolerance, and timeline — not a one-size-fits-all template.\"",
-    confidence: "medium",
-    source: "ai",
-  });
-
-  // ── CONTENT COMPLETENESS ──────────────────────────────────────────────────
-
-  if (!MOCK_PAGE.hasSummary) {
-    findings.push({
-      id: "comp-1",
-      category: "completeness",
-      severity: "warning",
-      title: "Page summary / excerpt field is empty",
-      evidence: "Summary field not populated on this item",
-      rationale:
-        "The summary field is used in site search results, content listings, social sharing previews, and personalization rules. Leaving it empty forces the system to use truncated body copy.",
-      suggestedFix:
-        "Add a 1–2 sentence summary describing the page purpose and target audience.",
-      aiRewrite:
-        '"Personalized retirement planning from certified financial advisors. We help individuals and families build tax-efficient withdrawal strategies, investment portfolios, and estate plans tailored to their goals."',
-      confidence: "high",
-      source: "rules",
-    });
-  }
-
-  if (!MOCK_PAGE.hasTaxonomy) {
-    findings.push({
-      id: "comp-2",
-      category: "completeness",
-      severity: "warning",
-      title: "No taxonomy tags assigned to this item",
-      evidence: "Taxonomy / tags field is empty",
-      rationale:
-        "Taxonomy is used for content targeting, personalization rules, site search facets, and related content surfaces. Untagged pages are invisible to these systems.",
-      suggestedFix:
-        'Assign relevant tags: "Retirement Planning", "Investment Management", "Financial Services", "Personal Finance".',
-      confidence: "high",
-      source: "rules",
-    });
-  }
-
-  // ── BRAND / GOVERNANCE ────────────────────────────────────────────────────
-  // No issues on this demo page — governance score is clean.
-
-  return findings;
-}
-
-// ---------------------------------------------------------------------------
-// Scoring engine
-// ---------------------------------------------------------------------------
-function computeCategories(findings: Finding[]): CategoryScore[] {
-  const CATEGORY_DEFS: Array<{
-    category: Category;
-    label: string;
-    weight: number;
-    description: string;
-  }> = [
-    {
-      category: "accessibility",
-      label: "Accessibility",
-      weight: 30,
-      description: "WCAG 2.2-aligned checks",
-    },
-    {
-      category: "seo",
-      label: "SEO & Discoverability",
-      weight: 25,
-      description: "Google Search Central guidance",
-    },
-    {
-      category: "readability",
-      label: "Readability & Clarity",
-      weight: 20,
-      description: "Editorial heuristics",
-    },
-    {
-      category: "completeness",
-      label: "Content Completeness",
-      weight: 15,
-      description: "Business rule checks",
-    },
-    {
-      category: "governance",
-      label: "Brand & Governance",
-      weight: 10,
-      description: "Org-specific rules",
-    },
-  ];
-
+export function computeCategories(findings: Finding[]): CategoryScore[] {
   return CATEGORY_DEFS.map(({ category, label, weight, description }) => {
     const catFindings = findings.filter((f) => f.category === category);
     let score = 100;
@@ -307,40 +395,69 @@ function computeCategories(findings: Finding[]): CategoryScore[] {
       else if (f.severity === "warning") score -= 15;
       else score -= 5;
     }
-    return {
-      category,
-      label,
-      score: Math.max(0, score),
-      weight,
-      description,
-    };
+    return { category, label, score: Math.max(0, score), weight, description };
   });
 }
 
-// ---------------------------------------------------------------------------
-// Public API
-// ---------------------------------------------------------------------------
-export async function analyzePage(itemPath?: string): Promise<ContentAnalysis> {
-  // Simulate async processing time (rules engine + AI analysis)
-  await new Promise((resolve) => setTimeout(resolve, 2400));
-
-  const findings = buildFindings();
+export function computeAnalysis(
+  data: SitecorePageData,
+  findings: Finding[],
+): ContentAnalysis {
   const categories = computeCategories(findings);
   const overallScore = Math.round(
     categories.reduce((acc, cat) => acc + (cat.score * cat.weight) / 100, 0),
   );
+  const displayTitle =
+    data.displayName ||
+    data.pageName ||
+    findField(data.fields, "Title", "Browser Title")?.value ||
+    "(Untitled)";
 
   return {
     overallScore,
     grade: computeGrade(overallScore),
     categories,
     findings,
-    pageTitle: MOCK_PAGE.title,
-    itemPath:
-      itemPath ??
-      "/sitecore/content/Sites/financial/en/solutions/retirement-planning",
-    language: MOCK_PAGE.language,
-    pageType: MOCK_PAGE.pageType,
+    pageTitle: displayTitle,
+    itemPath: data.pagePath,
+    language: data.language,
+    pageType: data.templateName,
     analyzedAt: new Date(),
   };
+}
+
+// ─── Field ID enrichment ──────────────────────────────────────────────────────
+
+/**
+ * After the AI returns findings (with fieldName but no fieldId), cross-reference
+ * against the fetched FieldData array to populate fieldId and currentValue.
+ */
+export function enrichFindingsWithFieldIds(
+  findings: Finding[],
+  fields: FieldData[],
+): Finding[] {
+  return findings.map((f) => {
+    if (!f.fieldName || f.fieldId) return f;
+    const match = fields.find(
+      (fd) => fd.name.toLowerCase() === f.fieldName!.toLowerCase(),
+    );
+    if (!match) return f;
+    return {
+      ...f,
+      fieldId: match.id,
+      currentValue: f.currentValue ?? match.value,
+    };
+  });
+}
+
+// ─── Sitecore item ID formatting ──────────────────────────────────────────────
+
+/**
+ * XM Cloud Authoring GQL accepts IDs with or without braces.
+ * Normalise to the `{XXXXXXXX-XXXX-XXXX-XXXX-XXXXXXXXXXXX}` format.
+ */
+export function formatItemId(rawId: string): string {
+  const hex = rawId.replace(/[{}-]/g, "");
+  if (hex.length !== 32) return rawId;
+  return `{${hex.substring(0, 8)}-${hex.substring(8, 12)}-${hex.substring(12, 16)}-${hex.substring(16, 20)}-${hex.substring(20)}}`.toUpperCase();
 }
