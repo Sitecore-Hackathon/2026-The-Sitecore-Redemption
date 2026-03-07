@@ -1,0 +1,21 @@
+---
+ID: "{A1C10001-A1C1-A1C1-A1C1-A1C100000015}"
+Parent: "{A1C10001-A1C1-A1C1-A1C1-A1C100000003}"
+Template: "{455A3E98-A627-4B40-8035-E683A0331AC7}"
+Path: /sitecore/templates/modules/AI Content Intelligence/AI CI Global Settings/Settings/BannedPhrases
+SharedFields:
+- ID: "{AB162CC0-DC80-4ABF-8871-998EE5D7BA32}"
+  Hint: Type
+  Value: Multi-Line Text
+- ID: "{BE351A73-FCB0-4213-93FA-C302D8AB4F51}"
+  Hint: Shared
+  Value: "1"
+- ID: "{19A69332-A23E-4E70-8D16-B2640CB24CC8}"
+  Hint: Title
+  Value: Banned Phrases
+Languages:
+- Language: en
+  Fields:
+  - ID: "{B5E02AD9-D56F-4C41-A065-A133DB87BDEB}"
+    Hint: __Display name
+    Value: BannedPhrases

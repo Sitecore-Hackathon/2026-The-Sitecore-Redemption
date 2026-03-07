@@ -126,6 +126,8 @@ export interface ContentIntelligenceSettings {
   // AI persona
   preferredTone: string;
   readingLevel: string;
+  /** Free-text instruction to set the overall site vibe/demographic for AI suggestions */
+  contentVibe?: string;
 
   // Governance
   bannedPhrases: string[];

@@ -1,0 +1,18 @@
+---
+ID: "{A1C10001-A1C1-A1C1-A1C1-A1C100000044}"
+Parent: "{A1C10001-A1C1-A1C1-A1C1-A1C100000042}"
+Template: "{A1C10001-A1C1-A1C1-A1C1-A1C100000030}"
+Path: /sitecore/system/modules/AI Content Intelligence/Vendors/OpenAI
+SharedFields:
+- ID: "{A1C10001-A1C1-A1C1-A1C1-A1C100000032}"
+  Hint: VendorName
+  Value: openai
+- ID: "{A1C10001-A1C1-A1C1-A1C1-A1C100000034}"
+  Hint: ModelName
+  Value: gpt-4o
+Languages:
+- Language: en
+  Fields:
+  - ID: "{B5E02AD9-D56F-4C41-A065-A133DB87BDEB}"
+    Hint: __Display name
+    Value: OpenAI

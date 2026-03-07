@@ -4,21 +4,21 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Separator } from "@/components/ui/separator";
-import { AlertTriangle, CheckCircle2, Copy, Loader2, Settings } from "lucide-react";
+import { CheckCircle2, Loader2, Settings } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import {
   checkInitialized,
   DEFAULT_SETTINGS,
-  fetchFieldIdMap,
   fetchSettings,
   fetchVendorConfig,
-  hasVendorApiKey,
+  fetchVendorItems,
   initializeSettings,
   MODULE_ROOT_PATH,
+  normalizeGuid,
   saveSettingsFields,
-  VENDOR_PATHS,
+  saveVendorFields,
 } from "@/lib/content-intelligence/settings";
-import type { VendorConfig } from "@/lib/content-intelligence/settings";
+import type { VendorConfig, VendorItem } from "@/lib/content-intelligence/settings";
 import type { ContentIntelligenceSettings } from "@/lib/content-intelligence/types";
 import { useMarketplaceClient } from "@/components/providers/marketplace";
 
@@ -28,7 +28,6 @@ type InitState =
   | "checking"
   | "uninitialized"
   | "initializing"
-  | "initialized_no_key"
   | "ready"
   | "error";
 
@@ -54,25 +53,12 @@ function FieldRow({
   );
 }
 
-async function copyTextFallback(text: string): Promise<void> {
-  try {
-    await navigator.clipboard.writeText(text);
-  } catch {
-    const ta = document.createElement("textarea");
-    ta.value = text;
-    ta.style.cssText = "position:fixed;top:0;left:0;opacity:0;pointer-events:none;";
-    document.body.appendChild(ta);
-    ta.focus();
-    ta.select();
-    document.execCommand("copy");
-    document.body.removeChild(ta);
-  }
-}
-
 const SELECT_CLS =
   "w-full rounded-md border border-border bg-background px-3 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-primary";
 const INPUT_CLS =
   "w-full rounded-md border border-border bg-background px-3 py-1.5 text-xs focus:outline-none focus:ring-1 focus:ring-primary";
+const TEXTAREA_CLS =
+  "w-full rounded-md border border-border bg-background px-3 py-1.5 text-xs font-mono resize-none focus:outline-none focus:ring-1 focus:ring-primary";
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
@@ -86,15 +72,25 @@ export function SettingsPanel({ contextId, onSettingsSaved }: SettingsPanelProps
 
   const [initState, setInitState] = useState<InitState>("checking");
   const [form, setForm] = useState<ContentIntelligenceSettings>(DEFAULT_SETTINGS);
-  const [vendorItemIds, setVendorItemIds] = useState<{
-    anthropic: string | null;
-    openai: string | null;
-  }>({ anthropic: null, openai: null });
+
+  // Vendor items fetched from Sitecore after init
+  const [vendorItems, setVendorItems] = useState<VendorItem[]>([]);
+  // Inline vendor credential fields (keyed by vendorItem.itemId)
+  const [vendorApiKey, setVendorApiKey] = useState<string>("");
+  const [vendorModelName, setVendorModelName] = useState<string>("");
+
   const [saving, setSaving] = useState(false);
   const [saveStatus, setSaveStatus] = useState<"idle" | "success" | "error">("idle");
   const [saveError, setSaveError] = useState<string | null>(null);
   const [initError, setInitError] = useState<string | null>(null);
-  const [copied, setCopied] = useState<string | null>(null);
+
+  // Populate inline vendor credential fields when the selected vendor changes
+  function syncVendorFields(selectedItemId: string | null, items: VendorItem[]) {
+    const normalised = selectedItemId?.toUpperCase() ?? null;
+    const found = items.find((v) => v.itemId.toUpperCase() === normalised);
+    setVendorApiKey(found?.apiKey ?? "");
+    setVendorModelName(found?.modelName ?? "");
+  }
 
   const loadSettings = useCallback(async () => {
     if (!contextId) return;
@@ -105,10 +101,14 @@ export function SettingsPanel({ contextId, onSettingsSaved }: SettingsPanelProps
         setInitState("uninitialized");
         return;
       }
-      const loaded = await fetchSettings(client, contextId);
+      const [loaded, vendors] = await Promise.all([
+        fetchSettings(client, contextId),
+        fetchVendorItems(client, contextId),
+      ]);
       setForm(loaded);
-      const hasKey = await hasVendorApiKey(client, contextId);
-      setInitState(loaded.enableAIAnalysis && !hasKey ? "initialized_no_key" : "ready");
+      setVendorItems(vendors);
+      syncVendorFields(loaded.vendorItemId, vendors);
+      setInitState("ready");
     } catch {
       setInitState("error");
     }
@@ -124,10 +124,14 @@ export function SettingsPanel({ contextId, onSettingsSaved }: SettingsPanelProps
     try {
       const result = await initializeSettings(client, contextId);
       if (result.success) {
-        setVendorItemIds(result.vendorItemIds);
-        const loaded = await fetchSettings(client, contextId);
+        const [loaded, vendors] = await Promise.all([
+          fetchSettings(client, contextId),
+          fetchVendorItems(client, contextId),
+        ]);
         setForm(loaded);
-        setInitState("initialized_no_key");
+        setVendorItems(vendors);
+        syncVendorFields(loaded.vendorItemId, vendors);
+        setInitState("ready");
       } else {
         setInitError(result.error ?? "Initialization failed. Check content authoring permissions.");
         setInitState("uninitialized");
@@ -138,20 +142,27 @@ export function SettingsPanel({ contextId, onSettingsSaved }: SettingsPanelProps
     }
   }, [client, contextId]);
 
+  const handleVendorChange = useCallback((itemId: string) => {
+    setForm((f) => ({ ...f, vendorItemId: itemId || null }));
+    syncVendorFields(itemId || null, vendorItems);
+  }, [vendorItems]);
+
   const handleSave = useCallback(async () => {
     if (!form.settingsItemId) return;
     setSaving(true);
     setSaveStatus("idle");
     setSaveError(null);
     try {
-      const fieldIdMap = await fetchFieldIdMap(client, form.settingsItemId, contextId);
+      // Save Global Settings
       const fieldValues: Record<string, string> = {
         EnableAIAnalysis: form.enableAIAnalysis ? "1" : "0",
-        AIVendor: form.aiVendor ?? "",
+        // Droplink requires {UPPERCASE-GUID} — normalise regardless of what GQL returned
+        AIVendor: form.vendorItemId ? normalizeGuid(form.vendorItemId) : "",
         PreferredTone: form.preferredTone,
         ReadingLevel: form.readingLevel,
-        BannedPhrases: form.bannedPhrases.join("|"),
-        RequiredSchemaTypes: form.requiredSchemaTypes.join("|"),
+        ContentVibe: form.contentVibe ?? "",
+        BannedPhrases: form.bannedPhrases.join("\n"),
+        RequiredSchemaTypes: form.requiredSchemaTypes.join("\n"),
         MetaDescMinChars: String(form.metaDescMinChars),
         MetaDescMaxChars: String(form.metaDescMaxChars),
         TitleMinChars: String(form.titleMinChars),
@@ -165,51 +176,47 @@ export function SettingsPanel({ contextId, onSettingsSaved }: SettingsPanelProps
         WeightGovernance: String(form.categoryWeights.governance),
         AccessibilityThreshold: form.accessibilityThreshold,
       };
-      await saveSettingsFields(client, form.settingsItemId, contextId, fieldIdMap, fieldValues);
+      await saveSettingsFields(client, form.settingsItemId, contextId, fieldValues);
+
+      // Save vendor credentials if a vendor is selected
+      if (form.vendorItemId) {
+        await saveVendorFields(client, form.vendorItemId, contextId, vendorApiKey, vendorModelName);
+        // Refresh vendor items so inline fields reflect saved values
+        const updatedVendors = await fetchVendorItems(client, contextId);
+        setVendorItems(updatedVendors);
+      }
+
       setSaveStatus("success");
       const updated = await fetchSettings(client, contextId);
       setForm(updated);
-      const vendorConfig = await fetchVendorConfig(client, contextId, updated.aiVendor);
+
+      // Build vendor config from in-memory form state so the just-saved API key is
+      // immediately available for AI calls — avoids a cache miss when re-reading from
+      // Sitecore immediately after writing.
+      let vendorConfig: VendorConfig | null = null;
+      if (form.vendorItemId && vendorApiKey) {
+        const selectedVendor = vendorItems.find((v) => v.itemId === form.vendorItemId);
+        if (selectedVendor) {
+          vendorConfig = {
+            vendor: selectedVendor.vendor,
+            apiKey: vendorApiKey,
+            model: vendorModelName || (selectedVendor.vendor === "anthropic" ? "claude-sonnet-4-6" : "gpt-4o"),
+            itemId: form.vendorItemId,
+          };
+        }
+      }
+      // Fall back to fetching from Sitecore if we can't construct it from form state
+      if (!vendorConfig) {
+        vendorConfig = await fetchVendorConfig(client, contextId, updated.aiVendor);
+      }
       onSettingsSaved(updated, vendorConfig);
-      const hasKey = await hasVendorApiKey(client, contextId);
-      setInitState(updated.enableAIAnalysis && !hasKey ? "initialized_no_key" : "ready");
     } catch (err) {
       setSaveStatus("error");
       setSaveError(err instanceof Error ? err.message : "Save failed");
     } finally {
       setSaving(false);
     }
-  }, [client, contextId, form, onSettingsSaved]);
-
-  const handleDisableAI = useCallback(async () => {
-    if (!form.settingsItemId) {
-      setForm((f) => ({ ...f, enableAIAnalysis: false }));
-      return;
-    }
-    setSaving(true);
-    try {
-      const fieldIdMap = await fetchFieldIdMap(client, form.settingsItemId, contextId);
-      await saveSettingsFields(client, form.settingsItemId, contextId, fieldIdMap, {
-        EnableAIAnalysis: "0",
-      });
-      const updated = await fetchSettings(client, contextId);
-      setForm(updated);
-      const vendorConfig = await fetchVendorConfig(client, contextId, updated.aiVendor);
-      onSettingsSaved(updated, vendorConfig);
-      setInitState("ready");
-    } catch {
-      // Non-fatal — user can still manually uncheck and save
-      setForm((f) => ({ ...f, enableAIAnalysis: false }));
-    } finally {
-      setSaving(false);
-    }
-  }, [client, contextId, form.settingsItemId, onSettingsSaved]);
-
-  const handleCopy = useCallback(async (text: string, key: string) => {
-    await copyTextFallback(text);
-    setCopied(key);
-    setTimeout(() => setCopied(null), 2000);
-  }, []);
+  }, [client, contextId, form, vendorApiKey, vendorModelName, onSettingsSaved]);
 
   const weightSum =
     form.categoryWeights.accessibility +
@@ -240,6 +247,11 @@ export function SettingsPanel({ contextId, onSettingsSaved }: SettingsPanelProps
       </Alert>
     );
   }
+
+  // Selected vendor item (for inline credential display)
+  const selectedVendorItem = vendorItems.find(
+    (v) => v.itemId.toUpperCase() === (form.vendorItemId?.toUpperCase() ?? ""),
+  );
 
   // ─── Render ──────────────────────────────────────────────────────────────────
 
@@ -274,50 +286,6 @@ export function SettingsPanel({ contextId, onSettingsSaved }: SettingsPanelProps
               ) : (
                 "Initialize Settings"
               )}
-            </Button>
-          </AlertDescription>
-        </Alert>
-      )}
-
-      {/* No API key banner */}
-      {initState === "initialized_no_key" && (
-        <Alert variant="warning">
-          <AlertTriangle className="h-4 w-4" />
-          <AlertTitle>API key required</AlertTitle>
-          <AlertDescription className="space-y-3">
-            <p>
-              AI analysis is enabled but no API key is configured. Add your key in the Sitecore
-              Content Editor, or disable AI analysis below.
-            </p>
-            <div className="space-y-1.5">
-              {(
-                [
-                  { label: "Anthropic", path: VENDOR_PATHS.anthropic },
-                  { label: "OpenAI", path: VENDOR_PATHS.openai },
-                ] as const
-              ).map(({ label, path }) => (
-                <div key={label} className="flex items-center gap-2">
-                  <code className="text-xs font-mono text-muted-foreground flex-1 truncate">{path}</code>
-                  <Button
-                    size="xs"
-                    variant="outline"
-                    colorScheme="neutral"
-                    onClick={() => handleCopy(path, label)}
-                  >
-                    <Copy className="!w-3 !h-3" />
-                    {copied === label ? "Copied!" : "Copy path"}
-                  </Button>
-                </div>
-              ))}
-            </div>
-            <Button
-              size="sm"
-              variant="outline"
-              colorScheme="neutral"
-              onClick={handleDisableAI}
-              disabled={saving}
-            >
-              Disable AI Analysis
             </Button>
           </AlertDescription>
         </Alert>
@@ -360,23 +328,51 @@ export function SettingsPanel({ contextId, onSettingsSaved }: SettingsPanelProps
             </label>
           </FieldRow>
 
-          <FieldRow label="AI Vendor" hint="Which AI provider to use for analysis">
+          <FieldRow label="AI Vendor" hint="Select which AI provider to use for analysis">
             <select
-              value={form.aiVendor ?? ""}
-              onChange={(e) => {
-                const v = e.target.value;
-                setForm((f) => ({
-                  ...f,
-                  aiVendor: v === "anthropic" || v === "openai" ? v : null,
-                }));
-              }}
+              value={form.vendorItemId ?? ""}
+              onChange={(e) => handleVendorChange(e.target.value)}
               className={SELECT_CLS}
             >
-              <option value="">Auto (use .env API key)</option>
-              <option value="anthropic">Anthropic (Claude)</option>
-              <option value="openai">OpenAI (GPT)</option>
+              <option value="">— Select vendor —</option>
+              {vendorItems.map((v) => (
+                <option key={v.itemId} value={v.itemId}>
+                  {v.vendor === "anthropic" ? "Anthropic (Claude)" : "OpenAI (GPT)"}
+                </option>
+              ))}
             </select>
           </FieldRow>
+
+          {/* Inline vendor credentials — shown when a vendor is selected */}
+          {selectedVendorItem && (
+            <div className="ml-3 pl-3 border-l-2 border-border space-y-3">
+              <FieldRow
+                label="API Key"
+                hint={`${selectedVendorItem.vendor === "anthropic" ? "Anthropic" : "OpenAI"} API key — stored in Sitecore`}
+              >
+                <input
+                  type="password"
+                  value={vendorApiKey}
+                  onChange={(e) => setVendorApiKey(e.target.value)}
+                  placeholder={selectedVendorItem.vendor === "anthropic" ? "sk-ant-…" : "sk-…"}
+                  className={INPUT_CLS}
+                  autoComplete="off"
+                />
+              </FieldRow>
+              <FieldRow
+                label="Model Name"
+                hint="Leave blank to use the default model for this vendor"
+              >
+                <input
+                  type="text"
+                  value={vendorModelName}
+                  onChange={(e) => setVendorModelName(e.target.value)}
+                  placeholder={selectedVendorItem.vendor === "anthropic" ? "claude-sonnet-4-6" : "gpt-4o"}
+                  className={INPUT_CLS}
+                />
+              </FieldRow>
+            </div>
+          )}
         </section>
 
         <Separator />
@@ -413,6 +409,21 @@ export function SettingsPanel({ contextId, onSettingsSaved }: SettingsPanelProps
           </FieldRow>
 
           <FieldRow
+            label="Content Vibe"
+            hint="Free-text instruction for the AI's overall tone and demographic target"
+          >
+            <textarea
+              value={form.contentVibe ?? ""}
+              onChange={(e) =>
+                setForm((f) => ({ ...f, contentVibe: e.target.value || undefined }))
+              }
+              rows={3}
+              placeholder="e.g. This site is catered for a Gen-Z demographic interested in fashion and sustainability."
+              className={TEXTAREA_CLS}
+            />
+          </FieldRow>
+
+          <FieldRow
             label="Banned Phrases"
             hint="One phrase per line — AI will flag these if found in content"
           >
@@ -429,7 +440,7 @@ export function SettingsPanel({ contextId, onSettingsSaved }: SettingsPanelProps
               }
               rows={3}
               placeholder={"lorem ipsum\nsynergy\nclick here"}
-              className="w-full rounded-md border border-border bg-background px-3 py-1.5 text-xs font-mono resize-none focus:outline-none focus:ring-1 focus:ring-primary"
+              className={TEXTAREA_CLS}
             />
           </FieldRow>
 
@@ -450,7 +461,7 @@ export function SettingsPanel({ contextId, onSettingsSaved }: SettingsPanelProps
               }
               rows={2}
               placeholder={"Article\nBreadcrumb"}
-              className="w-full rounded-md border border-border bg-background px-3 py-1.5 text-xs font-mono resize-none focus:outline-none focus:ring-1 focus:ring-primary"
+              className={TEXTAREA_CLS}
             />
           </FieldRow>
         </section>

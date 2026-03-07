@@ -1,0 +1,15 @@
+---
+ID: "{A1C10001-A1C1-A1C1-A1C1-A1C10000004E}"
+Parent: "{A1C10001-A1C1-A1C1-A1C1-A1C10000004A}"
+Template: "{A1C10001-A1C1-A1C1-A1C1-A1C100000060}"
+Path: /sitecore/system/modules/AI Content Intelligence/Config/Reading Levels/expert
+SharedFields:
+- ID: "{A1C10001-A1C1-A1C1-A1C1-A1C100000062}"
+  Hint: DisplayText
+  Value: Expert / Professional
+Languages:
+- Language: en
+  Fields:
+  - ID: "{B5E02AD9-D56F-4C41-A065-A133DB87BDEB}"
+    Hint: __Display name
+    Value: expert

@@ -1,0 +1,15 @@
+---
+ID: "{A1C10001-A1C1-A1C1-A1C1-A1C100000001}"
+Parent: "{D9B2F2EC-5BD3-45A3-BAF9-1C9BCC9E1FC5}"
+Template: "{A87A00B1-E6DB-45AB-8B54-636FEC3B5523}"
+Path: /sitecore/templates/modules/AI Content Intelligence
+SharedFields:
+- ID: "{06D5295C-ED2F-4A54-9BF2-26228D113318}"
+  Hint: __Icon
+  Value: Office/32x32/elements_brain.png
+Languages:
+- Language: en
+  Fields:
+  - ID: "{B5E02AD9-D56F-4C41-A065-A133DB87BDEB}"
+    Hint: __Display name
+    Value: AI Content Intelligence

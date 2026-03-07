@@ -1,0 +1,11 @@
+---
+ID: "{A1C10001-A1C1-A1C1-A1C1-A1C100000031}"
+Parent: "{A1C10001-A1C1-A1C1-A1C1-A1C100000030}"
+Template: "{E269FBB5-3750-427A-9149-7AA950B49301}"
+Path: /sitecore/templates/modules/AI Content Intelligence/AI CI Vendor/Vendor
+Languages:
+- Language: en
+  Fields:
+  - ID: "{B5E02AD9-D56F-4C41-A065-A133DB87BDEB}"
+    Hint: __Display name
+    Value: Vendor

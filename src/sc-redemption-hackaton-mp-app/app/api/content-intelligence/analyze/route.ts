@@ -169,6 +169,10 @@ function buildSystemPrompt(settings?: ContentIntelligenceSettings): string {
     ? `\n\nREQUIRED SCHEMA TYPES: Check whether the page content supports these structured data types: ${schemas.join(", ")}. Flag missing schema opportunities as "suggestion" findings.`
     : "";
 
+  const vibeSection = settings?.contentVibe
+    ? `\n\nSITE CONTENT VIBE: ${settings.contentVibe}. All suggestions must align with this tone and demographic target.`
+    : "";
+
   return `You are a Sitecore XM Cloud content quality analyst specialising in SEO, WCAG accessibility, editorial clarity, and content governance.
 
 ${toneInstruction}
@@ -187,7 +191,7 @@ Rules:
 - For plain text fields (no [HTML field] marker): do not add any HTML tags — plain text only.
 - If a finding is about a missing field (empty value), applyValue should be the suggested content to add.
 - Maximum 8 findings total. Prioritise the most impactful.
-- Return ONLY a valid JSON array — no markdown fences, no explanation outside the array.${bannedSection}${schemaSection}
+- Return ONLY a valid JSON array — no markdown fences, no explanation outside the array.${bannedSection}${schemaSection}${vibeSection}
 
 Each finding object must match exactly:
 {
