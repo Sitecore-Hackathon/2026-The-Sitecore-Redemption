@@ -695,17 +695,23 @@ export function ContentIntelligencePanel() {
           // Not fatal — canvas reload is best-effort
         }
 
-        // Mark applied locally
-        setAnalysis((prev) =>
-          prev
-            ? {
-                ...prev,
-                findings: prev.findings.map((f) =>
-                  f.id === finding.id ? { ...f, applied: true } : f,
-                ),
-              }
-            : prev,
-        );
+        // Mark applied and remove all other findings that reference the same field.
+        // If the field was mentioned in both Warnings and Suggestions, they're now moot.
+        setAnalysis((prev) => {
+          if (!prev) return prev;
+          const fixedFieldName = finding.fieldName?.toLowerCase();
+          const updated = prev.findings
+            .map((f) => (f.id === finding.id ? { ...f, applied: true } : f))
+            .filter((f) => {
+              // Always keep the finding we just applied
+              if (f.id === finding.id) return true;
+              // Keep findings that don't reference a field name
+              if (!fixedFieldName || !f.fieldName) return true;
+              // Drop other findings for the same field (they're now stale)
+              return f.fieldName.toLowerCase() !== fixedFieldName;
+            });
+          return { ...prev, findings: updated };
+        });
       } catch (err) {
         setError("Failed to apply fix: " + (err instanceof Error ? err.message : "Unknown error"));
       } finally {
