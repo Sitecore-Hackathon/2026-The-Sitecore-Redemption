@@ -54,19 +54,70 @@ type PagesCtx = Awaited<
   ReturnType<ReturnType<typeof useMarketplaceClient>["query"]>
 >["data"] & { siteInfo?: Record<string, unknown>; pageInfo?: Record<string, unknown> };
 
+// ─── GQL types ────────────────────────────────────────────────────────────────
+
+type GqlField = { fieldId?: string; name?: string; value?: string };
+type GqlFieldConnection = { nodes?: GqlField[] };
+type GqlChildItem = {
+  itemId?: string; name?: string; displayName?: string;
+  template?: { name?: string };
+  fields?: GqlFieldConnection;
+  children?: { nodes?: GqlChildItem[] };
+};
+type GqlRootItem = {
+  itemId?: string; name?: string; displayName?: string;
+  fields?: GqlFieldConnection;
+  children?: { nodes?: GqlChildItem[] };
+};
+type GqlResponse = { data?: { item?: GqlRootItem }; errors?: Array<{ message?: string }> };
+
 // ─── GQL query ────────────────────────────────────────────────────────────────
 
+// Sitecore XM Cloud Authoring GQL schema (v1/authoring/graphql):
+// item(where: ItemQueryInput) — accepts itemId, language, path, database, version, etc.
 const GET_ITEM_FIELDS_QUERY = `
-  query GetItemFields($itemId: String!, $language: String!) {
-    item(path: $itemId, language: $language) {
-      id
+  query GetItemFields($itemId: ID!, $language: String!) {
+    item(where: { itemId: $itemId, language: $language }) {
+      itemId
       name
       displayName
-      template { name id }
+      template { name }
       fields {
-        id
-        name
-        value
+        nodes {
+          fieldId
+          name
+          value
+        }
+      }
+      children {
+        nodes {
+          itemId
+          name
+          displayName
+          template { name }
+          fields {
+            nodes {
+              fieldId
+              name
+              value
+            }
+          }
+          children {
+            nodes {
+              itemId
+              name
+              displayName
+              template { name }
+              fields {
+                nodes {
+                  fieldId
+                  name
+                  value
+                }
+              }
+            }
+          }
+        }
       }
     }
   }
@@ -96,6 +147,27 @@ async function downloadPageHtml(pageRoute: string, pageTitle: string): Promise<v
   URL.revokeObjectURL(a.href);
 }
 
+async function downloadLayoutJson(
+  siteName: string,
+  routePath: string,
+  language: string,
+  pageTitle: string,
+): Promise<void> {
+  const params = new URLSearchParams({ siteName, routePath, language });
+  const res = await fetch(`/api/content-intelligence/layout-json?${params}`);
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error((body as { error?: string }).error ?? res.statusText);
+  }
+  const json = await res.json();
+  const blob = new Blob([JSON.stringify(json, null, 2)], { type: "application/json" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `layout-${pageTitle.replace(/[^a-z0-9]/gi, "-").toLowerCase()}.json`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+}
+
 // ─── Data-fetching helpers ────────────────────────────────────────────────────
 
 async function fetchItemFields(
@@ -104,6 +176,29 @@ async function fetchItemFields(
   language: string,
   contextId: string,
 ): Promise<FieldData[]> {
+  function collectChildFields(nodes: GqlChildItem[], prefix = ""): FieldData[] {
+    const out: FieldData[] = [];
+    for (const child of nodes) {
+      const label = prefix
+        ? `${prefix} > ${child.displayName || child.name || "?"}`
+        : (child.displayName || child.name || "?");
+      for (const f of child.fields?.nodes ?? []) {
+        if (!f.name || f.name.startsWith("__")) continue;
+        out.push({
+          id: f.fieldId ?? "",
+          name: `[${label}] ${f.name}`,
+          value: f.value ?? "",
+          sourceItemId: child.itemId,  // track which datasource item owns this field
+        });
+      }
+      if (child.children?.nodes?.length) {
+        out.push(...collectChildFields(child.children.nodes, label));
+      }
+    }
+    return out;
+  }
+
+
   try {
     const result = await client.mutate("xmc.authoring.graphql", {
       params: {
@@ -114,16 +209,40 @@ async function fetchItemFields(
         query: { sitecoreContextId: contextId },
       },
     });
+
     // Traverse the double-envelope: ClientSDK result → RequestResult → GQL body
-    const gqlBody = (result as unknown as { data?: { data?: { item?: { fields?: Array<{ id: string; name: string; value?: string }> } } } }).data;
-    const itemFields = gqlBody?.data?.item?.fields;
-    if (!Array.isArray(itemFields)) return [];
-    return itemFields.map((f) => ({
-      id: f.id ?? "",
+    const gqlResponse = (result as unknown as { data?: GqlResponse }).data as GqlResponse | undefined;
+
+    if (gqlResponse?.errors?.length) {
+      console.error(
+        "[content-intelligence] GQL errors:",
+        gqlResponse.errors.map((e) => e.message).join("; "),
+      );
+    }
+
+    const item = gqlResponse?.data?.item;
+    if (!item) {
+      console.warn("[content-intelligence] GQL returned no item. Response:", JSON.stringify(gqlResponse));
+      return [];
+    }
+
+    const pageFields: FieldData[] = (item.fields?.nodes ?? []).map((f) => ({
+      id: f.fieldId ?? "",
       name: f.name ?? "",
       value: f.value ?? "",
     }));
-  } catch {
+
+    const childFields = collectChildFields(item.children?.nodes ?? []);
+    const allFields = [...pageFields, ...childFields];
+
+    console.info(
+      `[content-intelligence] fetched ${pageFields.length} page fields + ${childFields.length} datasource fields. Non-empty:`,
+      allFields.filter(f => !f.name.startsWith("__") && f.value.trim()).map(f => `${f.name}: "${f.value.substring(0, 60)}"`),
+    );
+
+    return allFields;
+  } catch (err) {
+    console.error("[content-intelligence] fetchItemFields error:", err instanceof Error ? err.message : err);
     return [];
   }
 }
@@ -267,6 +386,7 @@ function EmptyState({
 function AnalysisResults({
   analysis,
   pageRoute,
+  siteName,
   onReanalyze,
   reanalyzing,
   onApplyFix,
@@ -274,6 +394,7 @@ function AnalysisResults({
 }: {
   analysis: ContentAnalysis;
   pageRoute: string;
+  siteName: string;
   onReanalyze: () => void;
   reanalyzing: boolean;
   onApplyFix: (finding: Finding) => Promise<void>;
@@ -281,6 +402,7 @@ function AnalysisResults({
 }) {
   const [downloading, setDownloading] = useState(false);
   const [downloadError, setDownloadError] = useState<string | null>(null);
+  const [downloadingLayout, setDownloadingLayout] = useState(false);
 
   const critical = analysis.findings.filter((f) => f.severity === "critical").length;
   const warnings = analysis.findings.filter((f) => f.severity === "warning").length;
@@ -295,6 +417,18 @@ function AnalysisResults({
       setDownloadError(err instanceof Error ? err.message : "Download failed");
     } finally {
       setDownloading(false);
+    }
+  };
+
+  const handleLayoutDownload = async () => {
+    setDownloadingLayout(true);
+    setDownloadError(null);
+    try {
+      await downloadLayoutJson(siteName, pageRoute, analysis.language, analysis.pageTitle);
+    } catch (err) {
+      setDownloadError(err instanceof Error ? err.message : "Layout JSON download failed");
+    } finally {
+      setDownloadingLayout(false);
     }
   };
 
@@ -399,11 +533,21 @@ function AnalysisResults({
               )}
               {downloading ? "Downloading…" : "Download Page HTML"}
             </Button>
-          ) : (
-            <p className="text-xs text-muted-foreground self-center">
-              Set <span className="font-mono">NEXT_PUBLIC_SITE_URL</span> in .env.local to enable HTML download.
-            </p>
-          )}
+          ) : null}
+          <Button
+            variant="outline"
+            colorScheme="neutral"
+            size="sm"
+            onClick={handleLayoutDownload}
+            disabled={downloadingLayout || !siteName || !pageRoute}
+          >
+            {downloadingLayout ? (
+              <Loader2 className="!w-3.5 !h-3.5 animate-spin" />
+            ) : (
+              <Download className="!w-3.5 !h-3.5" />
+            )}
+            {downloadingLayout ? "Downloading…" : "Download Layout JSON"}
+          </Button>
         </div>
         {downloadError && (
           <p className="text-xs text-danger-500">{downloadError}</p>
@@ -436,6 +580,13 @@ export function ContentIntelligencePanel() {
   // Subscribe to pages.context for live updates as the editor navigates pages
   useEffect(() => {
     let active = true;
+
+    // Safety net: if the SDK query never resolves/rejects (e.g. outside Sitecore),
+    // unblock the UI after 6 seconds so the panel doesn't show a spinner forever.
+    const sdkTimeout = setTimeout(() => {
+      if (active) setSdkReady(true);
+    }, 6_000);
+
     client
       .query("pages.context", {
         subscribe: true,
@@ -448,17 +599,20 @@ export function ContentIntelligencePanel() {
         },
       })
       .then((result) => {
+        clearTimeout(sdkTimeout);
         if (!active) return;
         if (result.data) setPagesContext(result.data as unknown as PagesCtx);
         unsubRef.current = result.unsubscribe;
         setSdkReady(true);
       })
       .catch(() => {
-        if (active) setSdkReady(true); // still mark ready so UI doesn't stay stuck
+        clearTimeout(sdkTimeout);
+        if (active) setSdkReady(true);
       });
 
     return () => {
       active = false;
+      clearTimeout(sdkTimeout);
       unsubRef.current?.();
     };
   }, [client]);
@@ -504,8 +658,8 @@ export function ContentIntelligencePanel() {
       setAnalyzeStep("Running rules engine…");
       const ruleFindings = runRulesEngine(pageData);
 
-      // 4. Claude AI semantic analysis
-      setAnalyzeStep("Running AI analysis via Claude…");
+      // 4. AI semantic analysis
+      setAnalyzeStep("Running AI analysis…");
       const rawAiFindings = await fetchAIFindings(pageData);
       const aiFindings = enrichFindingsWithFieldIds(rawAiFindings, fields);
 
@@ -540,9 +694,13 @@ export function ContentIntelligencePanel() {
 
       try {
         const siteInfo = pagesContext?.siteInfo as Record<string, unknown> | undefined;
+        // For datasource fields, use the datasource item's ID; otherwise use the page ID.
+        const targetItemId = finding.sourceItemId
+          ? formatItemId(finding.sourceItemId)
+          : formatItemId(pageInfo.id as string);
         await client.mutate("xmc.pages.saveFields", {
           params: {
-            path: { pageId: formatItemId(pageInfo.id as string) },
+            path: { pageId: targetItemId },
             body: {
               fields: [
                 {
@@ -668,6 +826,7 @@ export function ContentIntelligencePanel() {
           <AnalysisResults
             analysis={analysis}
             pageRoute={(pageInfo?.route as string) ?? (pageInfo?.path as string) ?? ""}
+            siteName={(siteInfo?.name as string) ?? (process.env.NEXT_PUBLIC_DEFAULT_SITE_NAME ?? "")}
             onReanalyze={runAnalysis}
             reanalyzing={analyzing}
             onApplyFix={applyFix}

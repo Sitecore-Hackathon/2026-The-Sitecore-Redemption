@@ -1,48 +1,36 @@
 /**
  * Next.js Instrumentation — route warmup
  *
- * In development, the first request to any route triggers a JIT compile that
- * can take several seconds. This file runs once when the Next.js server starts
- * and pre-fetches the content-intelligence page so it is compiled and ready
- * before Sitecore opens the panel.
- *
- * In production (`next start`) this is a no-op — the build already compiled
- * every route, so no warmup is needed.
+ * register() MUST return quickly — Next.js awaits it during server boot.
+ * The actual warmup fetch is detached (fire-and-forget) so it never blocks startup.
  */
 
-async function tryFetch(url: string): Promise<boolean> {
-  try {
-    const res = await fetch(url, { signal: AbortSignal.timeout(90_000) });
-    console.log(`[warmup] ${url} — ${res.status} ✓`);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-export async function register() {
-  // Only warm up in dev; production builds are pre-compiled
+async function warmupRoutes() {
   if (process.env.NODE_ENV !== "development") return;
 
   const port = process.env.PORT ?? "3000";
   const base = `http://localhost:${port}`;
-  const routes = ["/content-intelligence"];
 
-  // Turbopack can take 5–10 s to be ready for the first request.
-  // Retry up to 6 times with increasing delays (5 s, 10 s, 15 s, 20 s, 25 s, 30 s).
-  for (const route of routes) {
-    const url = `${base}${route}`;
-    let success = false;
+  // Wait for Turbopack to finish binding (one flat delay, not a retry loop)
+  await new Promise((resolve) => setTimeout(resolve, 8_000));
 
-    for (let attempt = 1; attempt <= 6 && !success; attempt++) {
-      const delay = attempt * 5_000;
-      await new Promise((resolve) => setTimeout(resolve, delay));
-      console.log(`[warmup] ${route} — attempt ${attempt}…`);
-      success = await tryFetch(url);
-    }
-
-    if (!success) {
-      console.warn(`[warmup] ${route} — gave up after 6 attempts. Route will compile on first real request.`);
+  for (const route of ["/content-intelligence"]) {
+    try {
+      const res = await fetch(`${base}${route}`, {
+        signal: AbortSignal.timeout(60_000),
+      });
+      console.log(`[warmup] ${route} — ${res.status} ✓`);
+    } catch (err) {
+      // Non-fatal — route compiles on first real request instead
+      console.warn(
+        `[warmup] ${route} — skipped (${err instanceof Error ? err.message : err})`,
+      );
     }
   }
+}
+
+export function register() {
+  // Detach so register() returns immediately and never delays server boot.
+  // void silences the "floating promise" lint warning intentionally.
+  void warmupRoutes();
 }

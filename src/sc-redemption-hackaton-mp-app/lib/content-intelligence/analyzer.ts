@@ -42,6 +42,13 @@ function wordCount(text: string): number {
     .filter(Boolean).length;
 }
 
+const LOREM_PATTERN = /\blorem\s+ipsum\b/i;
+
+/** Returns true if the value contains Lorem Ipsum placeholder text. */
+function isLoremIpsum(text: string): boolean {
+  return LOREM_PATTERN.test(text.replace(/<[^>]*>/g, " "));
+}
+
 /** Returns % of sentences that are likely passive voice (simple heuristic). */
 function passiveVoicePercent(text: string): number {
   const clean = text.replace(/<[^>]*>/g, " ");
@@ -313,6 +320,32 @@ export function runRulesEngine(data: SitecorePageData): Finding[] {
     });
   }
 
+  // ── PLACEHOLDER CONTENT ────────────────────────────────────────────────────
+
+  const loremFields = fields.filter(
+    (f) => !f.name.startsWith("__") && hasValue(f) && isLoremIpsum(f.value),
+  );
+  if (loremFields.length > 0) {
+    for (const lf of loremFields) {
+      findings.push({
+        id: id("gov"),
+        category: "governance",
+        severity: "critical",
+        source: "rules",
+        confidence: "high",
+        title: `Placeholder text detected in "${lf.name}"`,
+        evidence: `Field "${lf.name}" contains "Lorem ipsum" placeholder content`,
+        rationale:
+          "Lorem ipsum is placeholder text that should never appear on a published page. It signals the field was never populated with real content.",
+        suggestedFix:
+          "Replace the Lorem ipsum placeholder with real, authored content appropriate for this field.",
+        fieldName: lf.name,
+        fieldId: lf.id,
+        currentValue: lf.value,
+      });
+    }
+  }
+
   // Check for language-specific issues (non-English)
   if (language && language.toLowerCase() !== "en" && language.toLowerCase() !== "en-us") {
     const langTitle = findField(fields, "Title", "NavigationTitle");
@@ -445,6 +478,7 @@ export function enrichFindingsWithFieldIds(
     return {
       ...f,
       fieldId: match.id,
+      sourceItemId: match.sourceItemId,
       currentValue: f.currentValue ?? match.value,
     };
   });

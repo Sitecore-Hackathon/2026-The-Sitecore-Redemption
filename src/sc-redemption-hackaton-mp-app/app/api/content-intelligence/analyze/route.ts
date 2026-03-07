@@ -86,15 +86,24 @@ function synthesisePageContent(req: AnalyzeRequest["pageData"]): string {
   for (const f of sorted) {
     const val = f.value?.trim();
     if (!val) continue;
-    if (val.length > 3000) {
-      lines.push(`${f.name}: [content truncated — ${val.length} chars]`);
+    // Skip system fields
+    if (f.name.startsWith("__")) continue;
+    // Skip Sitecore-specific XML/JSON data fields (layout, image, link fields)
+    // but KEEP HTML content fields like RichText (<p>, <h1>, etc.)
+    if (/^(\{|<r[\s>]|<r\/>|<image[\s/>]|<link[\s/>]|<field[\s/>])/.test(val)) continue;
+    // Strip HTML tags for the AI — it needs the text, not the markup
+    const text = val.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+    if (!text) continue;
+    if (text.length > 3000) {
+      lines.push(`${f.name}: [content truncated — ${text.length} chars]`);
       continue;
     }
-    if (f.name.startsWith("__") || /^[{<]/.test(val)) continue;
-    lines.push(`${f.name}: ${val}`);
+    lines.push(`${f.name}: ${text}`);
   }
 
-  return lines.join("\n");
+  const result = lines.join("\n");
+  console.info(`[content-intelligence] synthesised page content (${lines.length - 5} fields):\n${result}`);
+  return result;
 }
 
 // ─── Shared system prompt ─────────────────────────────────────────────────────
@@ -107,6 +116,8 @@ Rules:
 - Each finding MUST reference a specific field by its exact name (as shown in the input).
 - Only raise issues that are directly evidenced by the field values provided.
 - Do NOT invent fields or values not present in the input.
+- ALWAYS flag any field that contains "Lorem ipsum" or other obvious placeholder/dummy text as a CRITICAL governance finding.
+- ALWAYS flag any field that contains repetitive, nonsensical, or clearly auto-generated filler text.
 - applyValue MUST be the complete replacement text ready to save to the field — not a description of what to write.
 - applyValue must respect the field's apparent type: plain text for title/meta fields, do not add HTML tags to plain text fields.
 - If a finding is about a missing field (empty value), applyValue should be the suggested content to add.
@@ -149,13 +160,13 @@ async function callOpenAI(pageContent: string): Promise<string> {
   const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
   const completion = await openai.chat.completions.create({
     model: OPENAI_MODEL,
-    max_tokens: 2048,
-    // OpenAI uses a single "messages" array with system + user roles
+    max_completion_tokens: 2048,
     messages: [
       { role: "system", content: SYSTEM_PROMPT },
       { role: "user", content: USER_PROMPT(pageContent) },
     ],
-    response_format: { type: "json_object" },
+    // No response_format — asking for a JSON array, not an object.
+    // json_object mode forces an object wrapper and causes parse failures.
   });
   return completion.choices[0]?.message?.content ?? "";
 }
@@ -251,6 +262,7 @@ export async function POST(
     const result = parseFindings(rawText);
 
     if ("error" in result) {
+      console.error(`[content-intelligence] ${provider} parse error: ${result.error}`);
       return NextResponse.json({ findings: [], error: result.error }, { status: 502 });
     }
 

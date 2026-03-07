@@ -7,6 +7,12 @@ export interface FieldData {
   name: string;
   /** Current raw field value */
   value: string;
+  /**
+   * The item that owns this field. For page fields this equals the page ID;
+   * for datasource fields it is the datasource item ID. Used by applyFix to
+   * target the correct item when calling saveFields.
+   */
+  sourceItemId?: string;
 }
 
 export interface SitecorePageData {
@@ -53,6 +59,8 @@ export interface Finding {
   fieldName?: string;
   /** Field GUID — populated after cross-referencing fetched fields */
   fieldId?: string;
+  /** The item that owns this field (page or datasource item ID) */
+  sourceItemId?: string;
   /** The field's current value at time of analysis */
   currentValue?: string;
   /** Exact replacement text to write back to the field via saveFields */
