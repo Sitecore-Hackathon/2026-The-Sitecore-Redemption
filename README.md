@@ -4,7 +4,7 @@
 The Sitecore Redemption
 
 ## Category
-Best use of AI
+Best Marketplace App for AI
 
 ## Description
 
@@ -36,7 +36,7 @@ _See full documentation in this file._
 
 ## Video link
 
-[Replace this Video link](#video-link)
+[Video link](https://drive.google.com/drive/folders/1z95xYTwvMlOq2RX8U0FUlmgVG7GEI9JS?usp=sharing)
 
 ## Pre-requisites and Dependencies
 
@@ -90,8 +90,13 @@ AI_PROVIDER=anthropic
 
 #### 1.4 — Build and start
 
-For local development:
+For local development: (this precompiles everything)
 
+```bash
+npm run preview
+```
+
+you can also do:
 ```bash
 npm run dev
 ```
