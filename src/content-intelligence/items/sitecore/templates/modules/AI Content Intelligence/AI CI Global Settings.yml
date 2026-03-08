@@ -1,0 +1,15 @@
+---
+ID: "{A1C10001-A1C1-A1C1-A1C1-A1C100000002}"
+Parent: "{A1C10001-A1C1-A1C1-A1C1-A1C100000001}"
+Template: "{AB86861A-6030-46C5-B394-E8F99E8B87DB}"
+Path: /sitecore/templates/modules/AI Content Intelligence/AI CI Global Settings
+SharedFields:
+- ID: "{06D5295C-ED2F-4A54-9BF2-26228D113318}"
+  Hint: __Icon
+  Value: Apps/32x32/Options.png
+Languages:
+- Language: en
+  Fields:
+  - ID: "{B5E02AD9-D56F-4C41-A065-A133DB87BDEB}"
+    Hint: __Display name
+    Value: AI CI Global Settings

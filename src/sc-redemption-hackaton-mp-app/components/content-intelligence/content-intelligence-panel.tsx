@@ -1,0 +1,921 @@
+"use client";
+
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import { Separator } from "@/components/ui/separator";
+import { Skeleton } from "@/components/ui/skeleton";
+import {
+  CategoryBars,
+  ScoreRing,
+} from "@/components/content-intelligence/score-display";
+import { FindingsList } from "@/components/content-intelligence/findings-list";
+import {
+  computeAnalysis,
+  enrichFindingsWithFieldIds,
+  formatItemId,
+  runRulesEngine,
+} from "@/lib/content-intelligence/analyzer";
+import type {
+  AnalyzeRequest,
+  AnalyzeResponse,
+  ContentAnalysis,
+  ContentIntelligenceSettings,
+  FieldData,
+  Finding,
+  SitecorePageData,
+} from "@/lib/content-intelligence/types";
+import {
+  DEFAULT_SETTINGS,
+  fetchSettings,
+  fetchVendorConfig,
+} from "@/lib/content-intelligence/settings";
+import type { VendorConfig } from "@/lib/content-intelligence/settings";
+import { SettingsPanel } from "@/components/content-intelligence/settings-panel";
+import {
+  useAppContext,
+  useMarketplaceClient,
+} from "@/components/providers/marketplace";
+import {
+  AlertTriangle,
+  BarChart2,
+  CheckCircle,
+  Download,
+  FileSearch,
+  Loader2,
+  RefreshCw,
+  Settings,
+  Sparkles,
+} from "lucide-react";
+import { useCallback, useEffect, useRef, useState } from "react";
+
+// ─── Types pulled from the SDK ────────────────────────────────────────────────
+// PagesContext, PagesContextSiteInfo etc. aren't exported from the package
+// top-level, so we use the query return type instead.
+type PagesCtx = Awaited<
+  ReturnType<ReturnType<typeof useMarketplaceClient>["query"]>
+>["data"] & { siteInfo?: Record<string, unknown>; pageInfo?: Record<string, unknown> };
+
+// ─── GQL types ────────────────────────────────────────────────────────────────
+
+type GqlField = { fieldId?: string; name?: string; value?: string };
+type GqlFieldConnection = { nodes?: GqlField[] };
+type GqlChildItem = {
+  itemId?: string; name?: string; displayName?: string;
+  template?: { name?: string };
+  fields?: GqlFieldConnection;
+  children?: { nodes?: GqlChildItem[] };
+};
+type GqlRootItem = {
+  itemId?: string; name?: string; displayName?: string;
+  fields?: GqlFieldConnection;
+  children?: { nodes?: GqlChildItem[] };
+};
+type GqlResponse = { data?: { item?: GqlRootItem }; errors?: Array<{ message?: string }> };
+
+// ─── GQL query ────────────────────────────────────────────────────────────────
+
+// Sitecore XM Cloud Authoring GQL schema (v1/authoring/graphql):
+// item(where: ItemQueryInput) — accepts itemId, language, path, database, version, etc.
+const GET_ITEM_FIELDS_QUERY = `
+  query GetItemFields($itemId: ID!, $language: String!) {
+    item(where: { itemId: $itemId, language: $language }) {
+      itemId
+      name
+      displayName
+      template { name }
+      fields {
+        nodes {
+          fieldId
+          name
+          value
+        }
+      }
+      children {
+        nodes {
+          itemId
+          name
+          displayName
+          template { name }
+          fields {
+            nodes {
+              fieldId
+              name
+              value
+            }
+          }
+          children {
+            nodes {
+              itemId
+              name
+              displayName
+              template { name }
+              fields {
+                nodes {
+                  fieldId
+                  name
+                  value
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+`;
+
+// ─── Layout JSON helpers ──────────────────────────────────────────────────────
+// Downloads are blocked in sandboxed iframes (no allow-downloads flag).
+// Instead we show the JSON inline with a copy-to-clipboard button.
+
+function prettyLayoutJson(layoutJson: string): string {
+  try {
+    return JSON.stringify(JSON.parse(layoutJson), null, 2);
+  } catch {
+    return layoutJson;
+  }
+}
+
+async function copyToClipboardWithFallback(text: string): Promise<void> {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.cssText = "position:fixed;top:0;left:0;opacity:0;pointer-events:none;";
+    document.body.appendChild(ta);
+    ta.focus();
+    ta.select();
+    document.execCommand("copy");
+    document.body.removeChild(ta);
+  }
+}
+
+// ─── Data-fetching helpers ────────────────────────────────────────────────────
+
+async function fetchItemFields(
+  client: ReturnType<typeof useMarketplaceClient>,
+  itemId: string,
+  language: string,
+  contextId: string,
+): Promise<FieldData[]> {
+  function collectChildFields(nodes: GqlChildItem[], prefix = ""): FieldData[] {
+    const out: FieldData[] = [];
+    for (const child of nodes) {
+      const label = prefix
+        ? `${prefix} > ${child.displayName || child.name || "?"}`
+        : (child.displayName || child.name || "?");
+      for (const f of child.fields?.nodes ?? []) {
+        if (!f.name || f.name.startsWith("__")) continue;
+        out.push({
+          id: f.fieldId ?? "",
+          name: `[${label}] ${f.name}`,
+          value: f.value ?? "",
+          sourceItemId: child.itemId,  // track which datasource item owns this field
+        });
+      }
+      if (child.children?.nodes?.length) {
+        out.push(...collectChildFields(child.children.nodes, label));
+      }
+    }
+    return out;
+  }
+
+
+  try {
+    const result = await client.mutate("xmc.authoring.graphql", {
+      params: {
+        body: {
+          query: GET_ITEM_FIELDS_QUERY,
+          variables: { itemId: formatItemId(itemId), language },
+        },
+        query: { sitecoreContextId: contextId },
+      },
+    });
+
+    // Traverse the double-envelope: ClientSDK result → RequestResult → GQL body
+    const gqlResponse = (result as unknown as { data?: GqlResponse }).data as GqlResponse | undefined;
+
+    if (gqlResponse?.errors?.length) {
+      console.error(
+        "[content-intelligence] GQL errors:",
+        gqlResponse.errors.map((e) => e.message).join("; "),
+      );
+    }
+
+    const item = gqlResponse?.data?.item;
+    if (!item) {
+      console.warn("[content-intelligence] GQL returned no item. Response:", JSON.stringify(gqlResponse));
+      return [];
+    }
+
+    const pageFields: FieldData[] = (item.fields?.nodes ?? []).map((f) => ({
+      id: f.fieldId ?? "",
+      name: f.name ?? "",
+      value: f.value ?? "",
+    }));
+
+    const childFields = collectChildFields(item.children?.nodes ?? []);
+    const allFields = [...pageFields, ...childFields];
+
+    console.info(
+      `[content-intelligence] fetched ${pageFields.length} page fields + ${childFields.length} datasource fields. Non-empty:`,
+      allFields.filter(f => !f.name.startsWith("__") && f.value.trim()).map(f => `${f.name}: "${f.value.substring(0, 60)}"`),
+    );
+
+    return allFields;
+  } catch (err) {
+    console.error("[content-intelligence] fetchItemFields error:", err instanceof Error ? err.message : err);
+    return [];
+  }
+}
+
+async function fetchAIFindings(
+  pageData: SitecorePageData,
+  settings?: ContentIntelligenceSettings,
+  apiKey?: string,
+  model?: string,
+): Promise<Finding[]> {
+  try {
+    const payload: AnalyzeRequest = { pageData, settings, apiKey, model };
+    const res = await fetch("/api/content-intelligence/analyze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    const json: AnalyzeResponse = await res.json();
+    if (json.error) console.warn("AI analysis warning:", json.error);
+    return json.findings ?? [];
+  } catch {
+    return [];
+  }
+}
+
+// ─── Sub-components ───────────────────────────────────────────────────────────
+
+function PanelLoadingSpinner() {
+  return (
+    <div className="flex flex-col items-center justify-center gap-3 py-12 text-center">
+      <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
+      <p className="text-sm text-muted-foreground">Connecting to Sitecore…</p>
+    </div>
+  );
+}
+
+function AnalysisSkeleton() {
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-col items-center gap-3">
+        <Skeleton className="h-[140px] w-[140px] rounded-full" />
+        <Skeleton className="h-5 w-28" />
+      </div>
+      <Separator />
+      <div className="space-y-3">
+        {Array.from({ length: 5 }).map((_, i) => (
+          <div key={i} className="space-y-1.5">
+            <div className="flex justify-between">
+              <Skeleton className="h-4 w-36" />
+              <Skeleton className="h-4 w-8" />
+            </div>
+            <Skeleton className="h-1.5 w-full rounded-full" />
+          </div>
+        ))}
+      </div>
+      <Separator />
+      <div className="space-y-2">
+        <Skeleton className="h-16 w-full rounded-lg" />
+        <Skeleton className="h-16 w-full rounded-lg" />
+        <Skeleton className="h-16 w-full rounded-lg" />
+      </div>
+    </div>
+  );
+}
+
+function QualityBanner({ analysis }: { analysis: ContentAnalysis }) {
+  const critical = analysis.findings.filter((f) => f.severity === "critical").length;
+  const warnings = analysis.findings.filter((f) => f.severity === "warning").length;
+
+  if (critical > 0) {
+    return (
+      <Alert variant="danger">
+        <AlertTitle>
+          {critical} critical issue{critical > 1 ? "s" : ""} — publishing not recommended
+        </AlertTitle>
+        <AlertDescription>
+          Resolve the critical findings below before publishing this page.
+        </AlertDescription>
+      </Alert>
+    );
+  }
+  if (warnings > 0) {
+    return (
+      <Alert variant="warning">
+        <AlertTitle>
+          {warnings} warning{warnings > 1 ? "s" : ""} — quality score is {analysis.overallScore}
+        </AlertTitle>
+        <AlertDescription>
+          This page can publish, but addressing warnings will improve discoverability.
+        </AlertDescription>
+      </Alert>
+    );
+  }
+  return (
+    <Alert variant="success">
+      <AlertTitle>Ready to publish</AlertTitle>
+      <AlertDescription>No critical issues or warnings. Score: {analysis.overallScore}/100.</AlertDescription>
+    </Alert>
+  );
+}
+
+function EmptyState({
+  onAnalyze,
+  loading,
+  pageTitle,
+}: {
+  onAnalyze: () => void;
+  loading: boolean;
+  pageTitle?: string;
+}) {
+  return (
+    <div className="flex flex-col items-center justify-center gap-5 py-8 text-center">
+      <div className="rounded-xl bg-primary-bg p-4">
+        <Sparkles className="h-7 w-7 text-primary-fg" />
+      </div>
+      <div className="space-y-1.5">
+        <h3 className="font-semibold text-sm">Ready to analyze</h3>
+        {pageTitle && (
+          <p className="text-xs text-muted-foreground font-mono truncate max-w-[200px]">
+            {pageTitle}
+          </p>
+        )}
+        <p className="text-xs text-muted-foreground max-w-[260px] leading-relaxed">
+          Fetches live field values, runs deterministic rules, then uses AI to
+          generate field-specific recommendations with one-click write-back.
+        </p>
+      </div>
+      <Button onClick={onAnalyze} disabled={loading} colorScheme="primary" size="sm">
+        <Sparkles className="!w-3.5 !h-3.5" />
+        {loading ? "Analyzing…" : "Analyze Page"}
+      </Button>
+      <div className="flex flex-wrap justify-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
+        {["Live fields", "Rules engine", "AI analysis", "Write-back"].map((step, i, arr) => (
+          <span key={step} className="flex items-center gap-1.5">
+            <span>{step}</span>
+            {i < arr.length - 1 && <span className="text-border">›</span>}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function AnalysisResults({
+  analysis,
+  layoutJson,
+  onReanalyze,
+  reanalyzing,
+  onApplyFix,
+  applyingFixId,
+}: {
+  analysis: ContentAnalysis;
+  layoutJson?: string;
+  onReanalyze: () => void;
+  reanalyzing: boolean;
+  onApplyFix: (finding: Finding) => Promise<void>;
+  applyingFixId: string | null;
+}) {
+  const [showLayoutJson, setShowLayoutJson] = useState(false);
+  const [copiedLayout, setCopiedLayout] = useState(false);
+
+  const critical = analysis.findings.filter((f) => f.severity === "critical").length;
+  const warnings = analysis.findings.filter((f) => f.severity === "warning").length;
+  const suggestions = analysis.findings.filter((f) => f.severity === "suggestion").length;
+
+  const prettyJson = layoutJson ? prettyLayoutJson(layoutJson) : null;
+
+  const handleCopyLayoutJson = async () => {
+    if (!prettyJson) return;
+    await copyToClipboardWithFallback(prettyJson);
+    setCopiedLayout(true);
+    setTimeout(() => setCopiedLayout(false), 2000);
+  };
+
+  return (
+    <div className="space-y-5">
+      <QualityBanner analysis={analysis} />
+
+      {/* Score ring */}
+      <div className="rounded-lg border bg-muted/40 py-5">
+        <ScoreRing score={analysis.overallScore} grade={analysis.grade} />
+      </div>
+
+      {/* Finding counts */}
+      <div className="flex flex-wrap gap-2">
+        {critical > 0 && (
+          <div className="flex items-center gap-1.5">
+            <AlertTriangle className="h-3.5 w-3.5 text-danger-500" />
+            <Badge colorScheme="danger">{critical} Critical</Badge>
+          </div>
+        )}
+        {warnings > 0 && (
+          <div className="flex items-center gap-1.5">
+            <AlertTriangle className="h-3.5 w-3.5 text-warning-500" />
+            <Badge colorScheme="warning">{warnings} Warning{warnings > 1 ? "s" : ""}</Badge>
+          </div>
+        )}
+        {suggestions > 0 && (
+          <div className="flex items-center gap-1.5">
+            <Sparkles className="h-3.5 w-3.5 text-primary-fg" />
+            <Badge colorScheme="primary">{suggestions} Suggestion{suggestions > 1 ? "s" : ""}</Badge>
+          </div>
+        )}
+        {analysis.findings.length === 0 && (
+          <div className="flex items-center gap-1.5">
+            <CheckCircle className="h-3.5 w-3.5 text-success-500" />
+            <Badge colorScheme="success">All checks passed</Badge>
+          </div>
+        )}
+      </div>
+
+      <Separator />
+
+      {/* Category breakdown */}
+      <div>
+        <div className="flex items-center gap-2 mb-3">
+          <BarChart2 className="h-4 w-4 text-muted-foreground" />
+          <h3 className="text-sm font-semibold">Category Breakdown</h3>
+        </div>
+        <CategoryBars categories={analysis.categories} />
+      </div>
+
+      <Separator />
+
+      {/* Findings */}
+      <div>
+        <div className="flex items-center gap-2 mb-3">
+          <FileSearch className="h-4 w-4 text-muted-foreground" />
+          <h3 className="text-sm font-semibold">Findings ({analysis.findings.length})</h3>
+        </div>
+        <FindingsList
+          findings={analysis.findings}
+          onApplyFix={onApplyFix}
+          applyingFixId={applyingFixId}
+        />
+      </div>
+
+      <Separator />
+
+      {/* Footer: meta + actions */}
+      <div className="space-y-3">
+        <div className="rounded-lg border bg-muted/40 divide-y divide-border text-xs">
+          {[
+            { label: "Page", value: analysis.pageTitle, mono: true },
+            { label: "Path", value: analysis.itemPath, mono: true, breakAll: true },
+            { label: "Template", value: analysis.pageType },
+            { label: "Language", value: analysis.language.toUpperCase() },
+            { label: "Analyzed", value: analysis.analyzedAt.toLocaleTimeString() },
+          ].map(({ label, value, mono, breakAll }) => (
+            <div key={label} className="flex gap-2 px-3 py-1.5">
+              <span className="w-16 shrink-0 text-muted-foreground">{label}</span>
+              <span className={`text-foreground ${mono ? "font-mono" : ""} ${breakAll ? "break-all" : "truncate"}`}>
+                {value}
+              </span>
+            </div>
+          ))}
+        </div>
+
+        <div className="flex flex-wrap gap-2">
+          <Button
+            variant="outline"
+            colorScheme="primary"
+            size="sm"
+            onClick={onReanalyze}
+            disabled={reanalyzing}
+          >
+            <RefreshCw className={`!w-3.5 !h-3.5 ${reanalyzing ? "animate-spin" : ""}`} />
+            {reanalyzing ? "Re-analyzing…" : "Re-analyze"}
+          </Button>
+          {prettyJson && (
+            <Button
+              variant="outline"
+              colorScheme="neutral"
+              size="sm"
+              onClick={() => setShowLayoutJson((v) => !v)}
+            >
+              <Download className="!w-3.5 !h-3.5" />
+              {showLayoutJson ? "Hide Layout JSON" : "Layout JSON"}
+            </Button>
+          )}
+        </div>
+
+        {showLayoutJson && prettyJson && (
+          <div className="rounded-lg border bg-muted/40 overflow-hidden">
+            <div className="flex items-center justify-between gap-2 px-3 py-2 border-b border-border">
+              <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">
+                Layout JSON (presentationDetails)
+              </span>
+              <Button
+                size="xs"
+                variant="outline"
+                colorScheme="neutral"
+                onClick={handleCopyLayoutJson}
+              >
+                {copiedLayout ? "Copied!" : "Copy"}
+              </Button>
+            </div>
+            <pre className="text-xs font-mono p-3 overflow-auto max-h-64 leading-relaxed whitespace-pre-wrap break-all">
+              {prettyJson}
+            </pre>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ─── Main panel ───────────────────────────────────────────────────────────────
+
+export function ContentIntelligencePanel() {
+  const client = useMarketplaceClient();
+  const appContext = useAppContext();
+
+  const [sdkReady, setSdkReady] = useState(false);
+  const [pagesContext, setPagesContext] = useState<PagesCtx | null>(null);
+  const [analysis, setAnalysis] = useState<ContentAnalysis | null>(null);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [applyingFixId, setApplyingFixId] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [analyzeStep, setAnalyzeStep] = useState("");
+  const [activeTab, setActiveTab] = useState<"analysis" | "settings">("analysis");
+  const [settings, setSettings] = useState<ContentIntelligenceSettings>(DEFAULT_SETTINGS);
+  const [vendorConfig, setVendorConfig] = useState<VendorConfig | null>(null);
+
+  const unsubRef = useRef<(() => void) | undefined>(undefined);
+
+  const contextId =
+    (appContext?.resourceAccess?.[0] as { context?: { preview?: string } } | undefined)
+      ?.context?.preview ?? "";
+
+  // Subscribe to pages.context for live updates as the editor navigates pages
+  useEffect(() => {
+    let active = true;
+
+    // Safety net: if the SDK query never resolves/rejects (e.g. outside Sitecore),
+    // unblock the UI after 6 seconds so the panel doesn't show a spinner forever.
+    const sdkTimeout = setTimeout(() => {
+      if (active) setSdkReady(true);
+    }, 6_000);
+
+    client
+      .query("pages.context", {
+        subscribe: true,
+        onSuccess: (data) => {
+          if (!active) return;
+          setPagesContext(data as unknown as PagesCtx);
+          // Clear stale analysis when page changes
+          setAnalysis(null);
+          setError(null);
+        },
+      })
+      .then((result) => {
+        clearTimeout(sdkTimeout);
+        if (!active) return;
+        if (result.data) setPagesContext(result.data as unknown as PagesCtx);
+        unsubRef.current = result.unsubscribe;
+        setSdkReady(true);
+      })
+      .catch(() => {
+        clearTimeout(sdkTimeout);
+        if (active) setSdkReady(true);
+      });
+
+    return () => {
+      active = false;
+      clearTimeout(sdkTimeout);
+      unsubRef.current?.();
+    };
+  }, [client]);
+
+  // Load settings from Sitecore once the SDK is ready
+  useEffect(() => {
+    if (!sdkReady || !contextId) return;
+    fetchSettings(client, contextId).then((s) => {
+      setSettings(s);
+      fetchVendorConfig(client, contextId, s.aiVendor).then((v) => setVendorConfig(v));
+    });
+  }, [sdkReady, contextId, client]);
+
+  const handleSettingsSaved = useCallback(
+    (newSettings: ContentIntelligenceSettings, newVendorConfig: VendorConfig | null) => {
+      setSettings(newSettings);
+      setVendorConfig(newVendorConfig);
+    },
+    [],
+  );
+
+  const runAnalysis = useCallback(async () => {
+    const pageInfo = pagesContext?.pageInfo as Record<string, unknown> | undefined;
+    if (!pageInfo?.id) {
+      setError("No page context available. Open a page in Sitecore Pages first.");
+      return;
+    }
+
+    setAnalyzing(true);
+    setError(null);
+    setAnalysis(null);
+
+    try {
+      const lang = (pageInfo.language as string | undefined) ?? "en";
+
+      // 1. Fetch real field values via Authoring GQL
+      setAnalyzeStep("Fetching live field values…");
+      const fields = await fetchItemFields(client, pageInfo.id as string, lang, contextId);
+
+      // 2. Build structured page data
+      const siteInfo = pagesContext?.siteInfo as Record<string, unknown> | undefined;
+      const template = pageInfo.template as { name?: string; id?: string } | undefined;
+      const pageData: SitecorePageData = {
+        pageId: pageInfo.id as string,
+        pageName: (pageInfo.name as string) ?? "",
+        displayName: (pageInfo.displayName as string) ?? "",
+        pagePath: (pageInfo.path as string) ?? "",
+        pageRoute: (pageInfo.route as string) ?? "",
+        language: lang,
+        version: (pageInfo.version as number) ?? 1,
+        revision: (pageInfo.revision as string) ?? "",
+        templateName: template?.name ?? "",
+        templateId: template?.id ?? "",
+        siteName: (siteInfo?.name as string) ?? "",
+        fields,
+        layoutJson: (pageInfo.presentationDetails as string) ?? undefined,
+      };
+
+      // 3. Deterministic rules engine
+      setAnalyzeStep("Running rules engine…");
+      const ruleFindings = runRulesEngine(pageData, settings);
+
+      // 4. AI semantic analysis (skipped when disabled in settings)
+      let rawAiFindings: Finding[] = [];
+      if (settings.enableAIAnalysis) {
+        setAnalyzeStep("Running AI analysis…");
+        rawAiFindings = await fetchAIFindings(
+          pageData,
+          settings,
+          vendorConfig?.apiKey,
+          vendorConfig?.model,
+        );
+      }
+      const aiFindings = enrichFindingsWithFieldIds(rawAiFindings, fields);
+
+      // 5. Deduplicate: drop AI findings that cover the same field as a rule finding
+      const coveredFieldNames = new Set(
+        ruleFindings.map((f) => f.fieldName?.toLowerCase()).filter(Boolean),
+      );
+      const uniqueAiFindings = aiFindings.filter(
+        (f) => !f.fieldName || !coveredFieldNames.has(f.fieldName.toLowerCase()),
+      );
+
+      // 6. Compute final score
+      setAnalyzeStep("Computing scores…");
+      const result = computeAnalysis(pageData, [...ruleFindings, ...uniqueAiFindings], settings);
+      setAnalysis(result);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Analysis failed. Please retry.");
+
+    } finally {
+      setAnalyzing(false);
+      setAnalyzeStep("");
+    }
+  }, [client, pagesContext, contextId, settings, vendorConfig]);
+
+  const applyFix = useCallback(
+    async (finding: Finding) => {
+      const pageInfo = pagesContext?.pageInfo as Record<string, unknown> | undefined;
+      if (!finding.fieldId || finding.applyValue === undefined || !pageInfo?.id) return;
+
+      setApplyingFixId(finding.id);
+      setError(null);
+
+      try {
+        const siteInfo = pagesContext?.siteInfo as Record<string, unknown> | undefined;
+        // For datasource fields, use the datasource item's ID; otherwise use the page ID.
+        const targetItemId = finding.sourceItemId
+          ? formatItemId(finding.sourceItemId)
+          : formatItemId(pageInfo.id as string);
+        await client.mutate("xmc.pages.saveFields", {
+          params: {
+            path: { pageId: targetItemId },
+            body: {
+              fields: [
+                {
+                  id: finding.fieldId,
+                  value: finding.applyValue,
+                  originalValue: finding.currentValue ?? "",
+                },
+              ],
+              language: (pageInfo.language as string) ?? "en",
+              site: (siteInfo?.name as string) ?? "",
+              revision: (pageInfo.revision as string) ?? undefined,
+              pageVersion: (pageInfo.version as number) ?? 1,
+            },
+            query: { sitecoreContextId: contextId },
+          },
+        });
+
+        // Reload the editor canvas so the saved value is visible immediately
+        try {
+          await client.mutate("pages.reloadCanvas");
+        } catch {
+          // Not fatal — canvas reload is best-effort
+        }
+
+        // Mark applied and remove all other findings that reference the same field.
+        // If the field was mentioned in both Warnings and Suggestions, they're now moot.
+        setAnalysis((prev) => {
+          if (!prev) return prev;
+          const fixedFieldName = finding.fieldName?.toLowerCase();
+          const updated = prev.findings
+            .map((f) => (f.id === finding.id ? { ...f, applied: true } : f))
+            .filter((f) => {
+              // Always keep the finding we just applied
+              if (f.id === finding.id) return true;
+              // Keep findings that don't reference a field name
+              if (!fixedFieldName || !f.fieldName) return true;
+              // Drop other findings for the same field (they're now stale)
+              return f.fieldName.toLowerCase() !== fixedFieldName;
+            });
+          return { ...prev, findings: updated };
+        });
+      } catch (err) {
+        setError("Failed to apply fix: " + (err instanceof Error ? err.message : "Unknown error"));
+      } finally {
+        setApplyingFixId(null);
+      }
+    },
+    [client, pagesContext, contextId],
+  );
+
+  const pageInfo = pagesContext?.pageInfo as Record<string, unknown> | undefined;
+  const siteInfo = pagesContext?.siteInfo as Record<string, unknown> | undefined;
+  const template = pageInfo?.template as { name?: string } | undefined;
+  const pageTitle =
+    (pageInfo?.displayName as string) ||
+    (pageInfo?.name as string) ||
+    (pageInfo?.path as string) ||
+    undefined;
+
+  return (
+    <Card style="outline" padding="md" className="w-full font-sans">
+      <CardHeader className="pb-3">
+        <div className="flex items-start justify-between gap-2">
+          <div className="flex items-start gap-2.5">
+            <div className="mt-0.5 rounded-md bg-primary-bg p-1.5">
+              <Sparkles className="h-4 w-4 text-primary-fg" />
+            </div>
+            <div>
+              <CardTitle className="text-sm font-semibold leading-tight">
+                AI Content Intelligence
+              </CardTitle>
+              <CardDescription className="text-xs mt-0.5">
+                SEO, accessibility &amp; editorial quality analysis
+              </CardDescription>
+            </div>
+          </div>
+          <Badge colorScheme="primary" size="sm">v1.0</Badge>
+        </div>
+
+        {pageInfo && (
+          <div className="mt-2.5 pt-2.5 border-t border-border flex flex-wrap gap-1.5">
+            {typeof siteInfo?.name === "string" && siteInfo.name && (
+              <Badge colorScheme="neutral" size="sm">{siteInfo.name}</Badge>
+            )}
+            {template?.name && (
+              <Badge colorScheme="neutral" size="sm">{template.name}</Badge>
+            )}
+            {typeof pageInfo.language === "string" && pageInfo.language && (
+              <Badge colorScheme="neutral" size="sm">
+                {pageInfo.language.toUpperCase()}
+              </Badge>
+            )}
+            {typeof pageInfo.version === "number" && pageInfo.version && (
+              <Badge colorScheme="neutral" size="sm">v{String(pageInfo.version)}</Badge>
+            )}
+          </div>
+        )}
+
+        {/* Tab navigation */}
+        <div className="mt-2.5 pt-0.5 flex border-b border-border">
+          {(["analysis", "settings"] as const).map((tab) => (
+            <button
+              key={tab}
+              onClick={() => setActiveTab(tab)}
+              className={`flex items-center gap-1 px-3 py-1.5 text-xs font-medium border-b-2 -mb-px transition-colors ${
+                activeTab === tab
+                  ? "border-primary text-primary-fg"
+                  : "border-transparent text-muted-foreground hover:text-foreground"
+              }`}
+            >
+              {tab === "settings" && <Settings className="h-3 w-3" />}
+              {tab.charAt(0).toUpperCase() + tab.slice(1)}
+            </button>
+          ))}
+        </div>
+      </CardHeader>
+
+      <CardContent className="space-y-4 pt-0">
+        {activeTab === "settings" ? (
+          <SettingsPanel contextId={contextId} onSettingsSaved={handleSettingsSaved} />
+        ) : (
+          <>
+            {error && (
+              <Alert variant="danger">
+                <AlertTitle>Error</AlertTitle>
+                <AlertDescription>{error}</AlertDescription>
+              </Alert>
+            )}
+
+            {!settings.settingsItemId && (
+              <Alert variant="warning">
+                <AlertTitle>Module not configured</AlertTitle>
+                <AlertDescription>
+                  AI Content Intelligence has not been set up yet. Using built-in defaults.{" "}
+                  <button
+                    onClick={() => setActiveTab("settings")}
+                    className="underline font-medium"
+                  >
+                    Go to Settings to initialize
+                  </button>
+                </AlertDescription>
+              </Alert>
+            )}
+
+            {settings.settingsItemId && !settings.enableAIAnalysis && (
+              <Alert variant="default">
+                <AlertTitle>AI analysis disabled</AlertTitle>
+                <AlertDescription>
+                  Rules-based analysis will still run.{" "}
+                  <button
+                    onClick={() => setActiveTab("settings")}
+                    className="underline text-primary-fg"
+                  >
+                    Enable in Settings
+                  </button>
+                </AlertDescription>
+              </Alert>
+            )}
+
+            {!sdkReady && !analyzing && (
+              <PanelLoadingSpinner />
+            )}
+
+            {sdkReady && !pageInfo && !analyzing && (
+              <Alert variant="default">
+                <AlertTitle>No page selected</AlertTitle>
+                <AlertDescription>
+                  Open a page in Sitecore Pages to begin analysis.
+                </AlertDescription>
+              </Alert>
+            )}
+
+            {analyzing && (
+              <div className="space-y-4">
+                <div className="flex items-center gap-2 rounded-md bg-primary-bg px-3 py-2.5 text-sm text-primary-fg">
+                  <Sparkles className="h-3.5 w-3.5 animate-pulse shrink-0" />
+                  <span className="font-medium">{analyzeStep || "Analyzing…"}</span>
+                </div>
+                <AnalysisSkeleton />
+              </div>
+            )}
+
+            {sdkReady && !analyzing && !analysis && pageInfo && (
+              <EmptyState
+                onAnalyze={runAnalysis}
+                loading={analyzing}
+                pageTitle={pageTitle}
+              />
+            )}
+
+            {!analyzing && analysis && (
+              <AnalysisResults
+                analysis={analysis}
+                layoutJson={(pageInfo?.presentationDetails as string) || undefined}
+                onReanalyze={runAnalysis}
+                reanalyzing={analyzing}
+                onApplyFix={applyFix}
+                applyingFixId={applyingFixId}
+              />
+            )}
+          </>
+        )}
+      </CardContent>
+    </Card>
+  );
+}

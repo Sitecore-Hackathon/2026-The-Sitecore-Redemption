@@ -1,0 +1,15 @@
+---
+ID: "{A1C10001-A1C1-A1C1-A1C1-A1C100000048}"
+Parent: "{A1C10001-A1C1-A1C1-A1C1-A1C100000046}"
+Template: "{A1C10001-A1C1-A1C1-A1C1-A1C100000060}"
+Path: /sitecore/system/modules/AI Content Intelligence/Config/Tones/conversational
+SharedFields:
+- ID: "{A1C10001-A1C1-A1C1-A1C1-A1C100000062}"
+  Hint: DisplayText
+  Value: Conversational
+Languages:
+- Language: en
+  Fields:
+  - ID: "{B5E02AD9-D56F-4C41-A065-A133DB87BDEB}"
+    Hint: __Display name
+    Value: conversational

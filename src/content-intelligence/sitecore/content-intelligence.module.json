@@ -1,0 +1,20 @@
+{
+  "$schema": ".sitecore/schemas/ModuleFile.schema.json",
+  "namespace": "AI Content Intelligence",
+  "items": {
+    "includes": [
+      {
+        "name": "templates",
+        "path": "/sitecore/templates/modules/AI Content Intelligence",
+        "scope": "ItemAndDescendants",
+        "allowedPushOperations": "CreateUpdateAndDelete"
+      },
+      {
+        "name": "module-system",
+        "path": "/sitecore/system/modules/AI Content Intelligence",
+        "scope": "ItemAndDescendants",
+        "allowedPushOperations": "CreateUpdateAndDelete"
+      }
+    ]
+  }
+}

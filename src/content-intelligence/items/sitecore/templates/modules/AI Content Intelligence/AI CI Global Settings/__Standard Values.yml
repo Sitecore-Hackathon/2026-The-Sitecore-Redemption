@@ -1,0 +1,57 @@
+---
+ID: "{A1C10001-A1C1-A1C1-A1C1-A1C100000025}"
+Parent: "{A1C10001-A1C1-A1C1-A1C1-A1C100000002}"
+Template: "{A1C10001-A1C1-A1C1-A1C1-A1C100000002}"
+Path: /sitecore/templates/modules/AI Content Intelligence/AI CI Global Settings/__Standard Values
+SharedFields:
+- ID: "{A1C10001-A1C1-A1C1-A1C1-A1C100000010}"
+  Hint: EnableAIAnalysis
+  Value: "1"
+- ID: "{A1C10001-A1C1-A1C1-A1C1-A1C100000012}"
+  Hint: PreferredTone
+  Value: formal
+- ID: "{A1C10001-A1C1-A1C1-A1C1-A1C100000013}"
+  Hint: ReadingLevel
+  Value: college
+- ID: "{A1C10001-A1C1-A1C1-A1C1-A1C100000017}"
+  Hint: MetaDescMinChars
+  Value: "70"
+- ID: "{A1C10001-A1C1-A1C1-A1C1-A1C100000018}"
+  Hint: MetaDescMaxChars
+  Value: "165"
+- ID: "{A1C10001-A1C1-A1C1-A1C1-A1C100000019}"
+  Hint: TitleMinChars
+  Value: "10"
+- ID: "{A1C10001-A1C1-A1C1-A1C1-A1C10000001A}"
+  Hint: TitleMaxChars
+  Value: "70"
+- ID: "{A1C10001-A1C1-A1C1-A1C1-A1C10000001B}"
+  Hint: BodyMinWords
+  Value: "100"
+- ID: "{A1C10001-A1C1-A1C1-A1C1-A1C10000001C}"
+  Hint: PassiveVoiceThreshold
+  Value: "40"
+- ID: "{A1C10001-A1C1-A1C1-A1C1-A1C10000001D}"
+  Hint: WeightAccessibility
+  Value: "30"
+- ID: "{A1C10001-A1C1-A1C1-A1C1-A1C10000001E}"
+  Hint: WeightSEO
+  Value: "25"
+- ID: "{A1C10001-A1C1-A1C1-A1C1-A1C10000001F}"
+  Hint: WeightReadability
+  Value: "20"
+- ID: "{A1C10001-A1C1-A1C1-A1C1-A1C100000020}"
+  Hint: WeightCompleteness
+  Value: "15"
+- ID: "{A1C10001-A1C1-A1C1-A1C1-A1C100000021}"
+  Hint: WeightGovernance
+  Value: "10"
+- ID: "{A1C10001-A1C1-A1C1-A1C1-A1C100000022}"
+  Hint: AccessibilityThreshold
+  Value: AA
+Languages:
+- Language: en
+  Fields:
+  - ID: "{B5E02AD9-D56F-4C41-A065-A133DB87BDEB}"
+    Hint: __Display name
+    Value: __Standard Values

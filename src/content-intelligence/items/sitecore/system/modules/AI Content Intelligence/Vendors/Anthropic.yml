@@ -1,0 +1,18 @@
+---
+ID: "{A1C10001-A1C1-A1C1-A1C1-A1C100000043}"
+Parent: "{A1C10001-A1C1-A1C1-A1C1-A1C100000042}"
+Template: "{A1C10001-A1C1-A1C1-A1C1-A1C100000030}"
+Path: /sitecore/system/modules/AI Content Intelligence/Vendors/Anthropic
+SharedFields:
+- ID: "{A1C10001-A1C1-A1C1-A1C1-A1C100000032}"
+  Hint: VendorName
+  Value: anthropic
+- ID: "{A1C10001-A1C1-A1C1-A1C1-A1C100000034}"
+  Hint: ModelName
+  Value: claude-sonnet-4-6
+Languages:
+- Language: en
+  Fields:
+  - ID: "{B5E02AD9-D56F-4C41-A065-A133DB87BDEB}"
+    Hint: __Display name
+    Value: Anthropic
