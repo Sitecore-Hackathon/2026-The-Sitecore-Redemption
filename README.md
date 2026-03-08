@@ -50,7 +50,7 @@ _See full documentation in this file._
 
 ## Installation instructions
 
-There are two independent parts to install: the **Marketplace App** (Next.js) and the **Sitecore content items** (templates + configuration).
+There are two independent parts to install: the **Marketplace App** (Next.js) and OPTIONALLY the **Sitecore content items** (templates + configuration).
 
 ---
 
@@ -103,16 +103,26 @@ npm run build
 npm start
 ```
 
-The app listens on `http://localhost:3000` by default. It must be accessible from the Sitecore Marketplace parent window (use a tunnel such as ngrok for local development).
+The app listens on `http://localhost:3000` by default. It must be accessible from the Sitecore Marketplace parent window (use localhost or a tunnel such as ngrok for local development).
 
 #### 1.5 — Register in Sitecore Marketplace
 
-1. In Sitecore Cloud Portal, navigate to **Marketplace** → **Extensions** → **Add extension**
-2. Set the extension URL to the deployed app URL (e.g. `https://your-tunnel.ngrok.io`)
-3. Configure the extension to appear in the **Pages** editor sidebar
-4. Save and publish the extension configuration
+1. In Sitecore Cloud Portal, navigate to **App Studio** → **Create App** 
+2. Enter **AI Content Intelligence** for the name and select **custom**
+3. Set the extension URL to the deployed app URL (e.g. `https://localhost:3000`)
+4. Configure the extension to appear in the **Page Context Panel**
+5. for the route, enter **/content-intelligence**
+6. An App Icon is provided in the repo under docs
+<img src="docs/images/app_icon.png" alt="App Icon />
+6. Save and activate the marketplace app.
+7. Add the application to your environment.
 
-<img src="docs/images/marketplace-registration.png" alt="Registering the extension in Sitecore Marketplace" />
+
+<img src="docs/images/createapp1.png" alt="Registering the extension in Sitecore Marketplace" />
+
+<img src="docs/images/createapp.png" alt="Registering the extension in Sitecore Marketplace" />
+
+<img src="docs/images/createapp2.png" alt="Registering the extension in Sitecore Marketplace" />
 
 ---
 
@@ -126,7 +136,13 @@ The module requires templates and configuration items under `/sitecore/system/mo
 2. Click the **AI Content Intelligence** extension in the sidebar
 3. If the module has not been set up, a banner will appear — click **Initialize Settings**
 
-<img src="docs/images/initialize-banner.png" alt="Initialization banner in the Settings tab" />
+<img src="docs/images/extensions1.png" alt="Initialization banner in the Settings tab" />
+
+<img src="docs/images/extensions2.png" alt="Initialization banner in the Settings tab" />
+
+<img src="docs/images/extensions3.png" alt="Initialization banner in the Settings tab" />
+
+<img src="docs/images/extensions4.png" alt="Initialization banner in the Settings tab" />
 
 The app will automatically create:
 - Custom templates (`AI CI Global Settings`, `AI CI Vendor`, `AI CI Config Option`)
@@ -162,8 +178,9 @@ After initialization, open the **Settings** tab in the extension to complete con
 1. Select **Anthropic (Claude)** or **OpenAI (GPT)** from the AI Vendor dropdown
 2. Enter your **API Key** and the desired **Model Name** (e.g. `claude-sonnet-4-6` or `gpt-4o`)
 3. Click **Save Settings**
+4. **JUDGING NOTE:  If you do not have a valid API key to utilize the credits, please reach out to me on slack or email and I can provide them**
 
-<img src="docs/images/settings-vendor.png" alt="Vendor API key configuration in the Settings panel" />
+<img src="docs/images/settings1.png" alt="Vendor API key configuration in the Settings panel" />
 
 The API key is stored directly in the Sitecore vendor item — it is not stored in the app or any external secret store. Restrict read access to the vendor items in Sitecore's security editor as appropriate for your environment.
 
@@ -175,7 +192,7 @@ The API key is stored directly in the Sitecore vendor item — it is not stored 
 
 Open any page in **Sitecore Pages**. The AI Content Intelligence panel appears in the right-hand sidebar. Switch between the **Analysis** and **Settings** tabs using the tab bar at the top.
 
-<img src="docs/images/panel-overview.png" alt="The AI Content Intelligence sidebar panel in Sitecore Pages" />
+<img src="docs/images/tabs1.png" alt="The AI Content Intelligence sidebar panel in Sitecore Pages" />
 
 ---
 
@@ -187,7 +204,9 @@ Open any page in **Sitecore Pages**. The AI Content Intelligence panel appears i
 4. The **AI analysis** sends the page content to your configured AI provider and returns semantic findings
 5. Results appear grouped by category with an overall score and grade
 
-<img src="docs/images/analysis-results.png" alt="Analysis results with score and findings" />
+<img src="docs/images/analyze1.png" alt="Analysis results with score and findings" />
+
+<img src="docs/images/analyze2.png" alt="Analysis results with score and findings" />
 
 ---
 
@@ -205,7 +224,6 @@ The overall score (0–100) is a weighted average across five categories. The gr
 
 Each category bar shows the category score and its configured weight. Category weights are configurable in the Settings tab and must sum to 100.
 
-<img src="docs/images/score-breakdown.png" alt="Score breakdown by category" />
 
 ---
 
@@ -220,7 +238,6 @@ Each finding card shows:
 - **Suggested fix** — a plain-language description of what to change
 - **Apply Fix button** — available when the AI has produced a ready-to-use replacement value
 
-<img src="docs/images/finding-card.png" alt="A finding card showing severity, evidence, and Apply Fix button" />
 
 Findings are sorted by severity (Critical first) within each category.
 
@@ -234,7 +251,7 @@ When a finding has an **Apply Fix** button:
 2. Confirm to write the value directly to the Sitecore field via the authoring API
 3. The finding card is marked as applied and the button is disabled
 
-<img src="docs/images/apply-fix.png" alt="Applying a fix from a finding card" />
+<img src="docs/images/analyze3.png" alt="Analysis results with score and findings" />
 
 > Re-analyze the page after applying fixes to see an updated score.
 
@@ -292,7 +309,7 @@ Weights determine each category's contribution to the overall score. They must s
 | Accessibility Threshold | WCAG 2.2 AA (standard) or AAA (enhanced) |
 | Passive Voice Threshold | Maximum % of passive-voice sentences before a readability warning |
 
-<img src="docs/images/settings-panel.png" alt="The Settings tab showing all configurable options" />
+<img src="docs/images/settings2.png" alt="Analysis results with score and findings" />
 
 ---
 
@@ -317,7 +334,7 @@ After initialization the following structure is created and can be inspected or 
   AI CI Config Option      ← Template for dropdown option items
 ```
 
-<img src="docs/images/content-editor-items.png" alt="The module content items in Sitecore Content Editor" />
+<img src="docs/images/contenttree.png" alt="The module content items in Sitecore Content Editor" />
 
 ---
 
